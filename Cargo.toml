@@ -1,0 +1,8 @@
+[package]
+name = "rssh"
+version = "0.1.0"
+authors = ["Hyunkang Kim <kimhyunkang@gmail.com>"]
+
+[dependencies]
+futures = "0.1"
+tokio-core = { git = "https://github.com/tokio-rs/tokio-core.git" }
