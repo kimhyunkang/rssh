@@ -1,0 +1,58 @@
+use std::io;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+
+use tokio_core::io::{Io, ReadHalf, WriteHalf};
+
+pub struct BufferedIo<S: Io> {
+    reader: BufReader<ReadHalf<S>>,
+    writer: BufWriter<WriteHalf<S>>
+}
+
+impl <S: Io> BufferedIo<S> {
+    pub fn new(stream: S) -> BufferedIo<S> {
+        let (rd, wr) = stream.split();
+        BufferedIo {
+            reader: BufReader::new(rd),
+            writer: BufWriter::new(wr)
+        }
+    }
+
+    pub fn with_capacity(capacity: usize, stream: S) -> BufferedIo<S> {
+        let (rd, wr) = stream.split();
+        BufferedIo {
+            reader: BufReader::with_capacity(capacity, rd),
+            writer: BufWriter::with_capacity(capacity, wr)
+        }
+    }
+}
+
+impl <S:Io> Read for BufferedIo<S> {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
+impl <S:Io> Write for BufferedIo<S> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writer.write(buf)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+impl <S:Io> BufRead for BufferedIo<S> {
+    #[inline]
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.reader.fill_buf()
+    }
+
+    #[inline]
+    fn consume(&mut self, amt: usize) {
+        self.reader.consume(amt)
+    }
+}
