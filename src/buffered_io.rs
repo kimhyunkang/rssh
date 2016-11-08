@@ -24,6 +24,11 @@ impl <S: Io> BufferedIo<S> {
             writer: BufWriter::with_capacity(capacity, wr)
         }
     }
+
+    #[inline]
+    pub fn nb_read_exact(&mut self, n: usize) -> Result<Option<&[u8]>, io::Error> {
+        self.reader.nb_read_exact(n)
+    }
 }
 
 impl <S:Io> Read for BufferedIo<S> {

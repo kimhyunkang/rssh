@@ -5,4 +5,5 @@ authors = ["Hyunkang Kim <kimhyunkang@gmail.com>"]
 
 [dependencies]
 futures = "0.1"
+rand = "0.3"
 tokio-core = { git = "https://github.com/tokio-rs/tokio-core.git", rev = "0a3dc0bb" }

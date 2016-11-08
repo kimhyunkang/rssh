@@ -1,6 +1,7 @@
 extern crate rssh;
 
 extern crate futures;
+extern crate rand;
 extern crate tokio_core;
 
 use rssh::buffered_io::BufferedIo;
@@ -26,7 +27,9 @@ fn main() {
         let pair = futures::lazy(|| futures::finished(socket));
         let amt = pair.and_then(|socket| {
             rssh::handshake::version_exchange(BufferedIo::new(socket), "RSSHS_0.1.0", "Hello")
-        });
+        }).and_then(|(stream, version)| {
+            rssh::handshake::algorithm_negotiation(stream, 
+        })
 
         let msg = amt.map(move |(_, version)| {
             println!("sent message to: {}", addr);
