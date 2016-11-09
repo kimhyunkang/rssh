@@ -111,7 +111,7 @@ impl AsyncBuf {
     }
 
     pub fn try_write_all(&mut self, buf: &[u8]) -> bool {
-        if self.try_reserve(buf.len()) {
+        if self.cap + buf.len() <= self.buf.len() {
             self.write_buf(buf);
             true
         } else {

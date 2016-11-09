@@ -56,21 +56,20 @@ impl <W: Write> AsyncBufWriter<W> {
 
     pub fn nb_write_exact(&mut self, buf: &[u8]) -> Poll<(), io::Error> {
         if buf.len() > self.buf.capacity() {
-            if self.buf.is_empty() {
-                // Try writing directly to inner stream
-                match self.inner.write(buf) {
-                    Ok(amt) => {
-                        self.buf.write_all(&buf[amt ..]);
-                        Ok(Async::Ready(()))
-                    }
-                    Err(e) => match e.kind() {
-                        io::ErrorKind::WouldBlock => Ok(Async::NotReady),
-                        _ => Err(e)
-                    }
+            if !self.buf.is_empty() {
+                if let Async::NotReady = try!(self.nb_flush_buf()) {
+                    return Ok(Async::NotReady);
                 }
-            } else {
-                self.buf.write_all(buf);
-                Ok(Async::Ready(()))
+            }
+            match self.inner.write(buf) {
+                Ok(amt) => {
+                    self.buf.write_all(&buf[amt ..]);
+                    Ok(Async::Ready(()))
+                }
+                Err(e) => match e.kind() {
+                    io::ErrorKind::WouldBlock => Ok(Async::NotReady),
+                    _ => Err(e)
+                }
             }
         } else {
             if self.buf.try_write_all(buf) {
