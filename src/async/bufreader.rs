@@ -55,6 +55,29 @@ impl <R: Read> AsyncBufReader<R> {
             }
         }
     }
+
+    pub fn nb_read_until(&mut self, byte: u8, limit: usize) -> Poll<&[u8], io::Error> {
+        if let Some(idx) = self.buf.get_ref().iter().position(|&c| c == byte) {
+            return Ok(Async::Ready(self.buf.consume_and_get(idx)));
+        } else {
+            self.buf.reserve(limit);
+            if let Err(e) = self.fill_buf_no_eof() {
+                if let io::ErrorKind::WouldBlock = e.kind() {
+                    return Ok(Async::NotReady);
+                } else {
+                    return Err(e)
+                }
+            }
+
+            if let Some(idx) = self.buf.get_ref().iter().position(|&c| c == byte) {
+                Ok(Async::Ready(self.buf.consume_and_get(idx)))
+            } else if self.buf.data_size() < limit {
+                Ok(Async::NotReady)
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "delimiter not found"))
+            }
+        }
+    }
 }
 
 pub trait AsyncPollRead {
