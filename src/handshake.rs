@@ -4,7 +4,6 @@ use transport::{NamedListParser, take_stream};
 use std::{fmt, io};
 use std::io::Write;
 use futures::{Future, done};
-use futures::stream::Stream;
 use rand::Rng;
 use tokio_core::io::{Io, flush, read_exact, read_until, write_all};
 

@@ -1,8 +1,6 @@
-use async_bufread::AsyncBufRead;
 use buffered_io::BufferedIo;
 
 use std::{io, mem, str};
-use std::io::Read;
 
 use futures::{Async, Future, Poll};
 use futures::stream::Stream;
@@ -53,7 +51,7 @@ impl <S: Stream> Future for TakeStream<S> {
 
         if end_of_stream {
             match mem::replace(&mut self.state, None) {
-                Some( TakeStreamState { inner: inner, buf: buf } ) =>
+                Some( TakeStreamState { inner, buf } ) =>
                     Ok(Async::Ready((inner, buf))),
                 None => unreachable!()
             }
@@ -116,6 +114,39 @@ impl <S: Io> Stream for NamedListParser<S>
                                 "Non-ASCII string in name-list"
                             ))
                     }
+                }
+            }
+        }
+    }
+}
+
+pub struct UnencryptedStream<S: Io> {
+    inner: BufferedIo<S>,
+    rd_header: Option<(usize, usize)>
+}
+
+impl <S: Io> UnencryptedStream<S> {
+    pub fn nb_read_packet<'r>(&'r mut self) -> Poll<&'r [u8], io::Error> {
+        match self.rd_header {
+            None => {
+                match try!(self.inner.nb_read_exact(5)) {
+                    None => return Ok(Async::NotReady),
+                    Some(buf) => {
+                        let pkt_len = ntoh(&buf[.. 4]) as usize;
+                        let pad_len = buf[5] as usize;
+                        if pkt_len < 16 || pkt_len < pad_len + 1 {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid header"));
+                        }
+                        self.rd_header = Some((pkt_len, pad_len));
+                    }
+                };
+                self.nb_read_packet()
+            },
+            Some((pkt_len, pad_len)) => match try!(self.inner.nb_read_exact(pkt_len - 1)) {
+                None => Ok(Async::NotReady),
+                Some(buf) => {
+                    self.rd_header = None;
+                    Ok(Async::Ready(&buf[.. pkt_len - pad_len - 1]))
                 }
             }
         }

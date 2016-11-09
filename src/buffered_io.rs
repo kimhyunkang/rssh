@@ -1,8 +1,9 @@
-use async_bufread::AsyncBufRead;
+use async_buf::AsyncBufRead;
 
 use std::io;
 use std::io::{BufRead, BufWriter, Read, Write};
 
+use futures::Poll;
 use tokio_core::io::{Io, ReadHalf, WriteHalf};
 
 static DEFAULT_BUFSIZE: usize = 4096;
@@ -26,7 +27,7 @@ impl <S: Io> BufferedIo<S> {
     }
 
     #[inline]
-    pub fn nb_read_exact(&mut self, n: usize) -> Result<Option<&[u8]>, io::Error> {
+    pub fn nb_read_exact(&mut self, n: usize) -> Poll<&[u8], io::Error> {
         self.reader.nb_read_exact(n)
     }
 }
