@@ -1,36 +1,62 @@
 use super::buf::AsyncBuf;
 use super::DEFAULT_BUFSIZE;
 
-use std::io;
+use std::{cmp, io};
 use std::io::Write;
 
 use futures::{Async, Poll};
 
-pub struct AsyncBufWriter<W> {
-    inner: W,
-    buf: AsyncBuf
+#[derive(Debug)]
+pub struct AsyncBufWriter<W: Write> {
+    inner: Option<W>,
+    buf: AsyncBuf,
+    panicked: bool
 }
 
-impl <W> AsyncBufWriter<W> {
+#[derive(Debug)]
+pub struct IntoInnerError<W>(W, io::Error);
+
+impl <W: Write> AsyncBufWriter<W> {
     pub fn new(inner: W) -> AsyncBufWriter<W> {
         AsyncBufWriter::with_capacity(DEFAULT_BUFSIZE, inner)
     }
 
     pub fn with_capacity(capacity: usize, inner: W) -> AsyncBufWriter<W> {
         AsyncBufWriter {
-            inner: inner,
-            buf: AsyncBuf::with_capacity(capacity)
+            inner: Some(inner),
+            buf: AsyncBuf::with_capacity(capacity),
+            panicked: false
         }
     }
 
-    pub fn into_inner(self) -> W {
-        self.inner
+    pub fn nb_into_inner(mut self) -> Poll<W, IntoInnerError<AsyncBufWriter<W>>> {
+        match self.nb_flush() {
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Ok(Async::Ready(())) => Ok(Async::Ready(self.inner.take().unwrap())),
+            Err(e) => Err(IntoInnerError(self, e))
+        }
     }
-}
 
-impl <W: Write> AsyncBufWriter<W> {
+    #[inline]
+    fn write_inner(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.panicked = true;
+        let res = self.inner.as_mut().expect("attempted to write after into_inner called").write(buf);
+        self.panicked = false;
+        res
+    }
+
+    #[inline]
+    fn flush_inner(&mut self) -> io::Result<()> {
+        self.panicked = true;
+        let res = self.inner.as_mut().expect("attempted to flush after into_inner called").flush();
+        self.panicked = false;
+        res
+    }
+
     pub fn nb_flush_buf(&mut self) -> Poll<(), io::Error> {
-        let amt = try_nb!(self.inner.write(self.buf.get_ref()));
+        self.panicked = true;
+        let amt = try_nb!(self.inner.as_mut().expect("attempted to flush after into_inner called").write(self.buf.get_ref()));
+        self.panicked = false;
         self.buf.consume(amt);
         if self.buf.is_empty() {
             Ok(Async::Ready(()))
@@ -47,7 +73,7 @@ impl <W: Write> AsyncBufWriter<W> {
         }
 
         if self.buf.is_empty() {
-            try_nb!(self.inner.flush());
+            try_nb!(self.flush_inner());
             Ok(Async::Ready(()))
         } else {
             Ok(Async::NotReady)
@@ -61,7 +87,7 @@ impl <W: Write> AsyncBufWriter<W> {
                     return Ok(Async::NotReady);
                 }
             }
-            match self.inner.write(buf) {
+            match self.write_inner(buf) {
                 Ok(amt) => {
                     self.buf.write_all(&buf[amt ..]);
                     Ok(Async::Ready(()))
@@ -90,6 +116,38 @@ impl <W: Write> AsyncBufWriter<W> {
     }
 }
 
+impl <W: Write> Write for AsyncBufWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() > self.buf.reserve_size() {
+            try!(self.nb_flush_buf());
+        }
+
+        if self.buf.is_empty() && self.buf.capacity() < buf.len() {
+            self.write_inner(buf)
+        } else {
+            let datasize = cmp::min(self.buf.reserve_size(), buf.len());
+            self.buf.get_mut()[.. datasize].copy_from_slice(&buf[.. datasize]);
+            Ok(datasize)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        while let Async::NotReady = try!(self.nb_flush_buf()) {
+            ()
+        }
+
+        self.flush_inner()
+    }
+}
+
+impl <W: Write> Drop for AsyncBufWriter<W> {
+    fn drop(&mut self) {
+        if self.inner.is_some() && !self.panicked {
+            let _r = self.nb_flush_buf();
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -110,7 +168,11 @@ mod test {
             assert_eq!(Async::Ready(()), bufwriter.nb_write_exact(b"ld!").expect("error!"));
             assert_eq!(Async::Ready(()), bufwriter.nb_flush().expect("error!"));
 
-            bufwriter.into_inner()
+            if let Async::Ready(w) = bufwriter.nb_into_inner().expect("error!") {
+                w
+            } else {
+                panic!("not ready");
+            }
         };
 
         let wsize = writer.position() as usize;
@@ -131,7 +193,11 @@ mod test {
             assert_eq!(Async::Ready(()), bufwriter.nb_write_exact(b"world!").expect("error!"));
             assert_eq!(Async::Ready(()), bufwriter.nb_flush().expect("error!"));
 
-            bufwriter.into_inner()
+            if let Async::Ready(w) = bufwriter.nb_into_inner().expect("error!") {
+                w
+            } else {
+                panic!("not ready");
+            }
         };
 
         let wsize = writer.position() as usize;

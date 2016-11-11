@@ -1,8 +1,9 @@
-use buffered_io::BufferedIo;
-use transport::{NamedListParser, take_stream};
+use async::bufreader::AsyncBufReader;
+use async::bufwriter::AsyncBufWriter;
+use transport::unencrypted_read_packet;
 
 use std::{fmt, io};
-use std::io::Write;
+use std::io::{Read, Write};
 use futures::{Future, done};
 use rand::Rng;
 use tokio_core::io::{Io, flush, read_exact, read_until, write_all};
@@ -23,17 +24,17 @@ impl From<io::Error> for HandshakeError {
 
 #[derive(Debug)]
 pub struct AlgorithmNegotiation {
-    kex_algorithms: Vec<String>,
-    server_host_key_algorithms: Vec<String>,
-    encryption_algorithms_client_to_server: Vec<String>,
-    encryption_algorithms_server_to_client: Vec<String>,
-    mac_algorithms_client_to_server: Vec<String>,
-    mac_algorithms_server_to_client: Vec<String>,
-    compression_algorithms_client_to_server: Vec<String>,
-    compression_algorithms_server_to_client: Vec<String>,
-    languages_client_to_server: Vec<String>,
-    languages_server_to_client: Vec<String>,
-    first_kex_packet_follows: bool
+    pub kex_algorithms: Vec<String>,
+    pub server_host_key_algorithms: Vec<String>,
+    pub encryption_algorithms_client_to_server: Vec<String>,
+    pub encryption_algorithms_server_to_client: Vec<String>,
+    pub mac_algorithms_client_to_server: Vec<String>,
+    pub mac_algorithms_server_to_client: Vec<String>,
+    pub compression_algorithms_client_to_server: Vec<String>,
+    pub compression_algorithms_server_to_client: Vec<String>,
+    pub languages_client_to_server: Vec<String>,
+    pub languages_server_to_client: Vec<String>,
+    pub first_kex_packet_follows: bool
 }
 
 fn write_named_list<W: Write, S: AsRef<[u8]>>(writer: &mut W, list: &[S]) -> io::Result<()> {
@@ -143,9 +144,9 @@ impl fmt::Display for HandshakeError {
     }
 }
 
-pub fn version_exchange<S>(stream: BufferedIo<S>, version_string: &str, comment: &str)
-        -> Box<Future<Item=(BufferedIo<S>, Vec<u8>), Error=HandshakeError>>
-    where S: Io + Send + 'static
+pub fn version_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, version_string: &str, comment: &str)
+        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, Vec<u8>), Error=HandshakeError>>
+    where R: Read + Send + 'static, W: Write + Send + 'static
 {
     let mut buf = Vec::with_capacity(256);
     write!(buf, "SSH-2.0-{} {}\r\n", version_string, comment).unwrap();
@@ -153,45 +154,32 @@ pub fn version_exchange<S>(stream: BufferedIo<S>, version_string: &str, comment:
         panic!("version string and comment too long");
     }
 
-    write_all(stream, buf).and_then(|(stream, _)| {
-        flush(stream)
-    }).and_then(|stream| {
-        read_until(stream, b'\n', Vec::with_capacity(256))
-    }).map_err(|e| {
-        e.into()
-    }).and_then(|(stream, buf)| {
+    let w = write_all(writer, buf).and_then(|(writer, _)| {
+        flush(writer)
+    }).map_err(|e| e.into());
+    
+    let r = read_until(reader, b'\n', Vec::with_capacity(256)).map_err(|e| e.into()).and_then(|(reader, buf)| {
         if buf.starts_with(b"SSH-2.0-") && buf.ends_with(b"\r\n") {
-            Ok((stream, buf[8 .. buf.len()-2].to_vec()))
+            Ok((reader, buf[8 .. buf.len()-2].to_vec()))
         } else {
             Err(HandshakeError::InvalidVersionExchange)
         }
-    }).boxed()
+    });
+
+    w.join(r).map(|(writer, (reader, version))| (reader, writer, version)).boxed()
 }
 
-pub fn algorithm_negotiation<S>(stream: BufferedIo<S>, supported_algorithms: &AlgorithmNegotiation, rng: &mut Rng)
-        -> Box<Future<Item=(BufferedIo<S>, AlgorithmNegotiation), Error=HandshakeError>>
-    where S: Clone + Io + Send + 'static
+pub fn algorithm_negotiation<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, supported_algorithms: &AlgorithmNegotiation, rng: &mut Rng)
+        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, Vec<u8>), Error=HandshakeError>>
+    where R: Read + Send + 'static, W: Write + Send + 'static
 {
-    done(supported_algorithms.build_message(rng)).and_then(|message| {
-        write_all(stream, message).and_then(|(stream, _)| {
-            flush(stream)
-        }).and_then(|stream| {
-            read_exact(stream, vec![0; 17])
+    let w = done(supported_algorithms.build_message(rng)).and_then(|message| {
+        write_all(writer, message).and_then(|(writer, _)| {
+            flush(writer)
         }).map_err(|e| e.into())
-    }).and_then(|(stream, buf)| {
-        if buf[0] == SSH_MSG_KEYINIT {
-            Ok(stream)
-        } else {
-            Err(HandshakeError::InvalidAlgorithmNegotiation)
-        }
-    }).and_then(|stream| {
-        take_stream(NamedListParser::new(stream), 10).and_then(|(parser, lists)| {
-            read_exact(parser.into_inner(), vec![0; 5]).map(|(stream, buf)| (stream, lists, buf))
-        }).then(|res| match res {
-            Ok((stream, lists, buf)) =>
-                AlgorithmNegotiation::from_name_lists(lists, buf[0]).map(|neg| (stream, neg)),
-            Err(e) =>
-                Err(e.into())
-        })
-    }).boxed()
+    });
+
+    let r = unencrypted_read_packet(reader).map_err(|e| e.into());
+
+    w.join(r).map(|(writer, (reader, packet))| (reader, writer, packet)).boxed()
 }

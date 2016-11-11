@@ -56,6 +56,11 @@ impl AsyncBuf {
     }
 
     #[inline]
+    pub fn reserve_size(&self) -> usize {
+        self.buf.len() - self.cap
+    }
+
+    #[inline]
     pub fn get_ref(&self) -> &[u8] {
         &self.buf[self.pos .. self.cap]
     }
