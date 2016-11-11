@@ -166,8 +166,8 @@ impl AlgorithmNegotiation {
 
         let mut buf = Vec::new();
         let payload_len = payload.len();
-        let pad_len = 8 - ((payload_len + 1) % 8);
-        let pkt_len = payload_len + pad_len - 1;
+        let pad_len = 8 - ((payload_len + 5) % 8);
+        let pkt_len = payload_len + pad_len + 1;
         let mut padding = vec![0u8; pad_len];
         rng.fill_bytes(&mut padding);
 
