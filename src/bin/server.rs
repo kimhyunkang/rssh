@@ -36,9 +36,7 @@ fn main() {
                 "RSSHS_0.1.0",
                 "Hello"
             )
-        });
-        /*
-        .and_then(|(reader, writer, version)| {
+        }).and_then(|(reader, writer, version)| {
             let supported_algorithms = AlgorithmNegotiation {
                 kex_algorithms: Vec::new(),
                 server_host_key_algorithms: Vec::new(),
@@ -61,12 +59,11 @@ fn main() {
                 &mut rng
             ).map(|(reader, writer, neg)| (reader, writer, version, neg))
         });
-        */
 
-        let msg = amt.map(move |(_, _, version)| {
+        let msg = amt.map(move |(_, _, version, neg)| {
             println!("sent message to: {}", addr);
             println!("got hello message: {}", String::from_utf8_lossy(&version));
-            // println!("got algorithm neg: {}", String::from_utf8_lossy(&neg));
+            println!("got algorithm neg: {:?}", neg);
         }).map_err(|e| {
             panic!("error: {}", e);
         });

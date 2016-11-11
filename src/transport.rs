@@ -10,8 +10,18 @@ pub struct UnencryptedStream<R: Read> {
     rd_header: Option<(usize, usize)>
 }
 
-fn ntoh(buf: &[u8]) -> u32 {
+pub fn ntoh(buf: &[u8]) -> u32 {
     ((buf[0] as u32) << 24) + ((buf[1] as u32) << 16) + ((buf[2] as u32) << 8) + (buf[3] as u32)
+}
+
+pub fn hton(n: u32) -> [u8; 4] {
+    let mut buf = [0u8; 4];
+    buf[0] = (n >> 24) as u8;
+    buf[1] = ((n >> 16) & 0xff) as u8;
+    buf[2] = ((n >> 8) & 0xff) as u8;
+    buf[3] = (n & 0xff) as u8;
+
+    buf
 }
 
 impl <R: Read> UnencryptedStream<R> {
@@ -29,7 +39,7 @@ impl <R: Read> UnencryptedStream<R> {
                     Async::NotReady => return Ok(Async::NotReady),
                     Async::Ready(buf) => {
                         let pkt_len = ntoh(&buf[.. 4]) as usize;
-                        let pad_len = buf[5] as usize;
+                        let pad_len = buf[4] as usize;
                         if pkt_len < 16 || pkt_len < pad_len + 1 {
                             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid header"));
                         }

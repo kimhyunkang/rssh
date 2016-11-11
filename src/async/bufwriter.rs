@@ -127,6 +127,7 @@ impl <W: Write> Write for AsyncBufWriter<W> {
         } else {
             let datasize = cmp::min(self.buf.reserve_size(), buf.len());
             self.buf.get_mut()[.. datasize].copy_from_slice(&buf[.. datasize]);
+            self.buf.fill(datasize);
             Ok(datasize)
         }
     }
@@ -152,7 +153,7 @@ impl <W: Write> Drop for AsyncBufWriter<W> {
 mod test {
     use super::*;
 
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
     use futures::Async;
 
     #[test]
@@ -192,6 +193,31 @@ mod test {
             assert_eq!(Async::Ready(()), bufwriter.nb_write_exact(b"Hello, ").expect("error!"));
             assert_eq!(Async::Ready(()), bufwriter.nb_write_exact(b"world!").expect("error!"));
             assert_eq!(Async::Ready(()), bufwriter.nb_flush().expect("error!"));
+
+            if let Async::Ready(w) = bufwriter.nb_into_inner().expect("error!") {
+                w
+            } else {
+                panic!("not ready");
+            }
+        };
+
+        let wsize = writer.position() as usize;
+        assert_eq!(b"Hello, world!".len(), wsize);
+
+        let buf = writer.into_inner();
+        assert_eq!(b"Hello, world!".as_ref(), &buf[.. wsize]);
+    }
+
+    #[test]
+    fn nb_write_exact_then_flush() {
+        let writer = {
+            let buf = vec![0u8; 16];
+            let writer = Cursor::new(buf);
+            let mut bufwriter = AsyncBufWriter::with_capacity(4, writer);
+
+            assert_eq!(Async::Ready(()), bufwriter.nb_write_exact(b"Hello, ").expect("error!"));
+            assert_eq!(Async::Ready(()), bufwriter.nb_write_exact(b"world!").expect("error!"));
+            bufwriter.flush().expect("error!");
 
             if let Async::Ready(w) = bufwriter.nb_into_inner().expect("error!") {
                 w

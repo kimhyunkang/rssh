@@ -1,12 +1,12 @@
 use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
-use transport::unencrypted_read_packet;
+use transport::{hton, ntoh, unencrypted_read_packet};
 
-use std::{fmt, io};
+use std::{fmt, io, str};
 use std::io::{Read, Write};
 use futures::{Future, done};
 use rand::Rng;
-use tokio_core::io::{Io, flush, read_exact, read_until, write_all};
+use tokio_core::io::{flush, read_until, write_all};
 
 use ::SSH_MSG_KEYINIT;
 
@@ -22,7 +22,7 @@ impl From<io::Error> for HandshakeError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AlgorithmNegotiation {
     pub kex_algorithms: Vec<String>,
     pub server_host_key_algorithms: Vec<String>,
@@ -35,6 +35,79 @@ pub struct AlgorithmNegotiation {
     pub languages_client_to_server: Vec<String>,
     pub languages_server_to_client: Vec<String>,
     pub first_kex_packet_follows: bool
+}
+
+pub struct AlgorithmNegotiationParser<'r> {
+    buf: &'r [u8],
+    pos: usize
+}
+
+impl <'r> AlgorithmNegotiationParser<'r> {
+    fn new<'a>(buf: &'a [u8]) -> AlgorithmNegotiationParser<'a> {
+        AlgorithmNegotiationParser {
+            buf: buf,
+            pos: 0
+        }
+    }
+
+    fn parse_name_list(&mut self) -> Result<Vec<String>, HandshakeError> {
+        if self.pos + 4 > self.buf.len() {
+            return Err(HandshakeError::InvalidAlgorithmNegotiation);
+        }
+
+        let list_len = ntoh(&self.buf[self.pos .. self.pos + 4]) as usize;
+        self.pos += 4;
+
+        if self.pos + list_len > self.buf.len() {
+            return Err(HandshakeError::InvalidAlgorithmNegotiation);
+        }
+
+        let list: Result<Vec<String>, HandshakeError> = self.buf[self.pos .. self.pos + list_len]
+            .split(|&c| c == b',')
+            .map(|slice|
+                 match str::from_utf8(slice) {
+                     Ok(s) => Ok(s.to_owned()),
+                     Err(_) => Err(HandshakeError::InvalidAlgorithmNegotiation)
+                 }
+            ).collect();
+        self.pos += list_len;
+
+        list
+    }
+
+    fn parse(&mut self) -> Result<AlgorithmNegotiation, HandshakeError> {
+        let mut data: AlgorithmNegotiation = Default::default();
+
+        if self.buf[0] != SSH_MSG_KEYINIT {
+            return Err(HandshakeError::InvalidAlgorithmNegotiation);
+        }
+
+        self.pos = 17;
+
+        data.kex_algorithms = try!(self.parse_name_list());
+        data.server_host_key_algorithms = try!(self.parse_name_list());
+        data.encryption_algorithms_client_to_server = try!(self.parse_name_list());
+        data.encryption_algorithms_server_to_client = try!(self.parse_name_list());
+        data.mac_algorithms_client_to_server = try!(self.parse_name_list());
+        data.mac_algorithms_server_to_client = try!(self.parse_name_list());
+        data.compression_algorithms_client_to_server = try!(self.parse_name_list());
+        data.compression_algorithms_server_to_client = try!(self.parse_name_list());
+        data.languages_client_to_server = try!(self.parse_name_list());
+        data.languages_server_to_client = try!(self.parse_name_list());
+
+        if self.pos != self.buf.len() - 5 {
+            return Err(HandshakeError::InvalidAlgorithmNegotiation);
+        }
+
+        data.first_kex_packet_follows =
+            match self.buf[self.pos] {
+                0 => false,
+                1 => true,
+                _ => return Err(HandshakeError::InvalidAlgorithmNegotiation)
+            };
+
+        Ok(data)
+    }
 }
 
 fn write_named_list<W: Write, S: AsRef<[u8]>>(writer: &mut W, list: &[S]) -> io::Result<()> {
@@ -72,65 +145,38 @@ fn write_named_list<W: Write, S: AsRef<[u8]>>(writer: &mut W, list: &[S]) -> io:
 
 impl AlgorithmNegotiation {
     pub fn build_message(&self, rng: &mut Rng) -> Result<Vec<u8>, HandshakeError> {
-        let mut buf = Vec::new();
-        try!(buf.write(&[SSH_MSG_KEYINIT]));
+        let mut payload = Vec::new();
+        try!(payload.write(&[SSH_MSG_KEYINIT]));
         let mut cookie = [0u8; 16];
         rng.fill_bytes(&mut cookie);
-        try!(buf.write(&cookie));
-        try!(write_named_list(&mut buf, &self.kex_algorithms));
-        try!(write_named_list(&mut buf, &self.server_host_key_algorithms));
-        try!(write_named_list(&mut buf, &self.encryption_algorithms_client_to_server));
-        try!(write_named_list(&mut buf, &self.encryption_algorithms_server_to_client));
-        try!(write_named_list(&mut buf, &self.mac_algorithms_client_to_server));
-        try!(write_named_list(&mut buf, &self.mac_algorithms_server_to_client));
-        try!(write_named_list(&mut buf, &self.compression_algorithms_client_to_server));
-        try!(write_named_list(&mut buf, &self.compression_algorithms_server_to_client));
-        try!(write_named_list(&mut buf, &self.languages_client_to_server));
-        try!(write_named_list(&mut buf, &self.languages_server_to_client));
+        try!(payload.write(&cookie));
+        try!(write_named_list(&mut payload, &self.kex_algorithms));
+        try!(write_named_list(&mut payload, &self.server_host_key_algorithms));
+        try!(write_named_list(&mut payload, &self.encryption_algorithms_client_to_server));
+        try!(write_named_list(&mut payload, &self.encryption_algorithms_server_to_client));
+        try!(write_named_list(&mut payload, &self.mac_algorithms_client_to_server));
+        try!(write_named_list(&mut payload, &self.mac_algorithms_server_to_client));
+        try!(write_named_list(&mut payload, &self.compression_algorithms_client_to_server));
+        try!(write_named_list(&mut payload, &self.compression_algorithms_server_to_client));
+        try!(write_named_list(&mut payload, &self.languages_client_to_server));
+        try!(write_named_list(&mut payload, &self.languages_server_to_client));
         let flag: u8 = if self.first_kex_packet_follows { 1 } else { 0 };
-        try!(buf.write(&[flag]));
-        try!(buf.write(&[0u8; 4]));
+        try!(payload.write(&[flag]));
+        try!(payload.write(&[0u8; 4]));
+
+        let mut buf = Vec::new();
+        let payload_len = payload.len();
+        let pad_len = 8 - ((payload_len + 1) % 8);
+        let pkt_len = payload_len + pad_len - 1;
+        let mut padding = vec![0u8; pad_len];
+        rng.fill_bytes(&mut padding);
+
+        try!(buf.write(&hton(pkt_len as u32)));
+        try!(buf.write(&[pad_len as u8]));
+        try!(buf.write(&payload));
+        try!(buf.write(&padding));
 
         Ok(buf)
-    }
-
-    pub fn from_name_lists(mut name_lists: Vec<Vec<String>>, first_kex_packet_follows: u8)
-        -> Result<AlgorithmNegotiation, HandshakeError>
-    {
-        if name_lists.len() != 10 {
-            return Err(HandshakeError::InvalidAlgorithmNegotiation);
-        }
-
-        let flag = match first_kex_packet_follows {
-            0 => false,
-            1 => true,
-            _ => return Err(HandshakeError::InvalidAlgorithmNegotiation)
-        };
-
-        let l9 = name_lists.pop().unwrap();
-        let l8 = name_lists.pop().unwrap();
-        let l7 = name_lists.pop().unwrap();
-        let l6 = name_lists.pop().unwrap();
-        let l5 = name_lists.pop().unwrap();
-        let l4 = name_lists.pop().unwrap();
-        let l3 = name_lists.pop().unwrap();
-        let l2 = name_lists.pop().unwrap();
-        let l1 = name_lists.pop().unwrap();
-        let l0 = name_lists.pop().unwrap();
-
-        Ok(AlgorithmNegotiation {
-            kex_algorithms: l0,
-            server_host_key_algorithms: l1,
-            encryption_algorithms_client_to_server: l2,
-            encryption_algorithms_server_to_client: l3,
-            mac_algorithms_client_to_server: l4,
-            mac_algorithms_server_to_client: l5,
-            compression_algorithms_client_to_server: l6,
-            compression_algorithms_server_to_client: l7,
-            languages_client_to_server: l8,
-            languages_server_to_client: l9,
-            first_kex_packet_follows: flag
-        })
     }
 }
 
@@ -170,7 +216,7 @@ pub fn version_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<
 }
 
 pub fn algorithm_negotiation<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, supported_algorithms: &AlgorithmNegotiation, rng: &mut Rng)
-        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, Vec<u8>), Error=HandshakeError>>
+        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, AlgorithmNegotiation), Error=HandshakeError>>
     where R: Read + Send + 'static, W: Write + Send + 'static
 {
     let w = done(supported_algorithms.build_message(rng)).and_then(|message| {
@@ -179,7 +225,11 @@ pub fn algorithm_negotiation<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWr
         }).map_err(|e| e.into())
     });
 
-    let r = unencrypted_read_packet(reader).map_err(|e| e.into());
+    let r = unencrypted_read_packet(reader).map_err(|e| e.into()).and_then(|(reader, buf)| {
+        let slice = buf.as_ref();
+        let mut parser = AlgorithmNegotiationParser::new(slice);
+        parser.parse().map(|neg| (reader, neg))
+    });
 
     w.join(r).map(|(writer, (reader, packet))| (reader, writer, packet)).boxed()
 }
