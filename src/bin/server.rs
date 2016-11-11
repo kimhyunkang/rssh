@@ -38,16 +38,16 @@ fn main() {
             )
         }).and_then(|(reader, writer, version)| {
             let supported_algorithms = AlgorithmNegotiation {
-                kex_algorithms: Vec::new(),
-                server_host_key_algorithms: Vec::new(),
-                encryption_algorithms_client_to_server: Vec::new(),
-                encryption_algorithms_server_to_client: Vec::new(),
-                mac_algorithms_client_to_server: Vec::new(),
-                mac_algorithms_server_to_client: Vec::new(),
-                compression_algorithms_client_to_server: Vec::new(),
-                compression_algorithms_server_to_client: Vec::new(),
-                languages_client_to_server: Vec::new(),
-                languages_server_to_client: Vec::new(),
+                kex_algorithms: vec!["ecdh-sha2-nistp256".to_string()],
+                server_host_key_algorithms: vec!["ecdsa-sha2-nistp256".to_string()],
+                encryption_algorithms_client_to_server: vec!["aes256-cbc".to_string()],
+                encryption_algorithms_server_to_client: vec!["aes256-cbc".to_string()],
+                mac_algorithms_client_to_server: vec!["hmac-sha2-256".to_string()],
+                mac_algorithms_server_to_client: vec!["hmac-sha2-256".to_string()],
+                compression_algorithms_client_to_server: vec!["none".to_string()],
+                compression_algorithms_server_to_client: vec!["none".to_string()],
+                languages_client_to_server: vec![],
+                languages_server_to_client: vec![],
                 first_kex_packet_follows: false
             };
 

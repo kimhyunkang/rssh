@@ -1,15 +1,16 @@
 use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
-use transport::{hton, ntoh, unencrypted_read_packet};
+use transport::{ntoh, unencrypted_read_packet, unencrypted_write_packet};
 
 use std::{fmt, io, str};
 use std::io::{Read, Write};
-use futures::{Future, done};
+use futures::Future;
 use rand::Rng;
 use tokio_core::io::{flush, read_until, write_all};
 
 use ::SSH_MSG_KEYINIT;
 
+#[derive(Debug)]
 pub enum HandshakeError {
     IoError(io::Error),
     InvalidVersionExchange,
@@ -164,19 +165,7 @@ impl AlgorithmNegotiation {
         try!(payload.write(&[flag]));
         try!(payload.write(&[0u8; 4]));
 
-        let mut buf = Vec::new();
-        let payload_len = payload.len();
-        let pad_len = 8 - ((payload_len + 5) % 8);
-        let pkt_len = payload_len + pad_len + 1;
-        let mut padding = vec![0u8; pad_len];
-        rng.fill_bytes(&mut padding);
-
-        try!(buf.write(&hton(pkt_len as u32)));
-        try!(buf.write(&[pad_len as u8]));
-        try!(buf.write(&payload));
-        try!(buf.write(&padding));
-
-        Ok(buf)
+        Ok(payload)
     }
 }
 
@@ -215,15 +204,15 @@ pub fn version_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<
     w.join(r).map(|(writer, (reader, version))| (reader, writer, version)).boxed()
 }
 
-pub fn algorithm_negotiation<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, supported_algorithms: &AlgorithmNegotiation, rng: &mut Rng)
+pub fn algorithm_negotiation<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, supported_algorithms: &AlgorithmNegotiation, rng: &mut RNG)
         -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, AlgorithmNegotiation), Error=HandshakeError>>
-    where R: Read + Send + 'static, W: Write + Send + 'static
+    where R: Read + Send + 'static, W: Write + Send + 'static, RNG: Rng
 {
-    let w = done(supported_algorithms.build_message(rng)).and_then(|message| {
-        write_all(writer, message).and_then(|(writer, _)| {
-            flush(writer)
-        }).map_err(|e| e.into())
-    });
+    let payload = supported_algorithms.build_message(rng).unwrap();
+
+    let w = unencrypted_write_packet(writer, payload, rng).and_then(|writer| {
+        flush(writer)
+    }).map_err(|e| e.into());
 
     let r = unencrypted_read_packet(reader).map_err(|e| e.into()).and_then(|(reader, buf)| {
         let slice = buf.as_ref();
