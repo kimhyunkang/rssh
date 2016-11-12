@@ -28,8 +28,9 @@ fn main() {
     println!("Listening on: {}", addr);
 
     let done = socket.incoming().for_each(move |(socket, addr)| {
+        println!("New connection from: {}", addr);
         let pair = futures::lazy(|| futures::finished(socket.split()));
-        let amt = pair.and_then(|(reader, writer)| {
+        let msg = pair.and_then(|(reader, writer)| {
             rssh::handshake::version_exchange(
                 AsyncBufReader::new(reader),
                 AsyncBufWriter::new(writer),
@@ -37,9 +38,11 @@ fn main() {
                 "Hello"
             )
         }).and_then(|(reader, writer, version)| {
+            println!("got hello message: {}", String::from_utf8_lossy(&version));
+
             let supported_algorithms = AlgorithmNegotiation {
                 kex_algorithms: vec!["ecdh-sha2-nistp256".to_string()],
-                server_host_key_algorithms: vec!["ecdsa-sha2-nistp256".to_string()],
+                server_host_key_algorithms: vec!["ssh-rsa".to_string()],
                 encryption_algorithms_client_to_server: vec!["aes256-cbc".to_string()],
                 encryption_algorithms_server_to_client: vec!["aes256-cbc".to_string()],
                 mac_algorithms_client_to_server: vec!["hmac-sha2-256".to_string()],
@@ -57,13 +60,13 @@ fn main() {
                 writer,
                 &supported_algorithms,
                 &mut rng
-            ).map(|(reader, writer, neg)| (reader, writer, version, neg))
-        });
-
-        let msg = amt.map(move |(_, _, version, neg)| {
-            println!("sent message to: {}", addr);
-            println!("got hello message: {}", String::from_utf8_lossy(&version));
+            )
+        }).and_then(|(reader, writer, neg)| {
             println!("got algorithm neg: {:?}", neg);
+
+            rssh::handshake::ecdh_sha2_nistp256_server(reader, writer)
+        }).map(|(_, _, buf)| {
+            println!("got key exchange: {:?}", buf);
         }).map_err(|e| {
             panic!("error: {}", e);
         });
