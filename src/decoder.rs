@@ -1,5 +1,6 @@
 use std::{fmt, str};
 use std::error::Error;
+use std::marker::PhantomData;
 
 use serde::de;
 
@@ -20,7 +21,7 @@ pub enum DecoderError {
 impl Error for DecoderError {
     fn description(&self) -> &str {
         match *self {
-            DecoderError::UnsupportedType(ref name) => "Unsupported Type",
+            DecoderError::UnsupportedType(_) => "Unsupported Type",
             DecoderError::UnexpectedEOF => "Unexpected EOF",
             DecoderError::NonBoolean => "Met non-boolean value",
             DecoderError::Utf8Error(ref e) => Error::description(e),
@@ -107,10 +108,46 @@ impl<'a> BinaryDecoder<'a> {
     }
 }
 
+pub fn de_inner<D: de::Deserializer, T: de::Deserialize>(d: &mut D) -> Result<T, D::Error> {
+    struct NestedVisitor<U> {
+        _x: PhantomData<U>
+    };
+
+    impl <U: de::Deserialize> de::Visitor for NestedVisitor<U> {
+        type Value = U;
+
+        fn visit_bytes<E>(&mut self, v: &[u8]) -> Result<U, E>
+            where E: de::Error
+        {
+            let mut decoder = BinaryDecoder::new(v);
+            de::Deserialize::deserialize(&mut decoder)
+                .map_err(|e| de::Error::custom(e.to_string()))
+        }
+    }
+
+    let visitor = NestedVisitor { _x: PhantomData };
+    d.deserialize_bytes(visitor)
+}
+
+pub fn de_bytes<D: de::Deserializer>(d: &mut D) -> Result<Vec<u8>, D::Error> {
+    struct IntoVisitor;
+
+    impl de::Visitor for IntoVisitor {
+        type Value = Vec<u8>;
+
+        fn visit_bytes<E>(&mut self, v: &[u8]) -> Result<Vec<u8>, E>
+        {
+            Ok(v.into())
+        }
+    }
+
+    d.deserialize_bytes(IntoVisitor)
+}
+
 macro_rules! impl_error {
     ($func:ident($($arg:ty),*), $errtype:expr) => {
         #[inline]
-        fn $func<__V>(&mut self, $(_: $arg,)* visitor: __V) -> ::std::result::Result<__V::Value, Self::Error>
+        fn $func<__V>(&mut self, $(_: $arg,)* _visitor: __V) -> ::std::result::Result<__V::Value, Self::Error>
             where __V: de::Visitor
             {
                 Err(DecoderError::UnsupportedType($errtype))
@@ -156,7 +193,7 @@ impl<'a> de::Deserializer for BinaryDecoder<'a> {
     fn deserialize_bytes<V>(&mut self, mut visitor: V) -> Result<V::Value, DecoderError>
         where V: de::Visitor
     {
-        self.parse_bytes().and_then(|bytes| visitor.visit_byte_buf(bytes.into()))
+        self.parse_bytes().and_then(|bytes| visitor.visit_bytes(bytes))
     }
 
     fn deserialize_string<V>(&mut self, mut visitor: V) -> Result<V::Value, DecoderError>
@@ -169,10 +206,9 @@ impl<'a> de::Deserializer for BinaryDecoder<'a> {
         })
     }
 
-    fn deserialize_struct<V>(&mut self,
-                             _name: &'static str,
-                             fields: &'static [&'static str],
-                             mut visitor: V)
+    fn deserialize_tuple<V>(&mut self,
+                            len: usize,
+                            mut visitor: V)
             -> Result<V::Value, DecoderError>
         where V: de::Visitor
     {
@@ -205,16 +241,68 @@ impl<'a> de::Deserializer for BinaryDecoder<'a> {
             }
         }
 
-        visitor.visit_seq(SeqVisitor { deserializer: self, len: fields.len() })
+        visitor.visit_seq(SeqVisitor { deserializer: self, len: len })
+    }
+
+    fn deserialize_struct<V>(&mut self,
+                             _name: &'static str,
+                             fields: &'static [&'static str],
+                             visitor: V)
+            -> Result<V::Value, DecoderError>
+        where V: de::Visitor
+    {
+        self.deserialize_tuple(fields.len(), visitor)
+    }
+
+    fn deserialize_struct_field<V>(&mut self, visitor: V) -> Result<V::Value, DecoderError>
+        where V: de::Visitor
+    {
+        self.deserialize_str(visitor)
     }
 
     fn deserialize_enum<V>(&mut self,
                            _name: &'static str,
                            _variants: &'static [&'static str],
-                           _visitor: V) -> Result<V::Value, Self::Error>
+                           mut visitor: V) -> Result<V::Value, Self::Error>
         where V: de::EnumVisitor
     {
-        Err(DecoderError::UnsupportedType("enum"))
+        struct KeyVisitor<'a, 'b: 'a> {
+            deserializer: &'a mut BinaryDecoder<'b>,
+        }
+
+        impl <'a, 'b: 'a> de::VariantVisitor for KeyVisitor<'a, 'b> {
+            type Error = DecoderError;
+
+            fn visit_variant<T>(&mut self) -> Result<T, DecoderError>
+                where T: de::Deserialize
+            {
+                de::Deserialize::deserialize(self.deserializer)
+            }
+
+            fn visit_newtype<T>(&mut self) -> Result<T, DecoderError>
+                where T: de::Deserialize
+            {
+                de::Deserialize::deserialize(self.deserializer)
+            }
+
+            fn visit_tuple<V>(&mut self,
+                              len: usize,
+                              visitor: V) -> Result<V::Value, DecoderError>
+                where V: de::Visitor
+            {
+                de::Deserializer::deserialize_tuple(self.deserializer, len, visitor)
+            }
+
+            fn visit_struct<V>(&mut self,
+                               fields: &'static [&'static str],
+                               visitor: V) -> Result<V::Value, DecoderError>
+                where V: de::Visitor
+            {
+                de::Deserializer::deserialize_tuple(self.deserializer, fields.len(), visitor)
+            }
+        }
+
+        visitor.visit(KeyVisitor { deserializer: self })
     }
 
     impl_error!(deserialize(), "struct");
@@ -234,11 +322,9 @@ impl<'a> de::Deserializer for BinaryDecoder<'a> {
     impl_error!(deserialize_map(), "map");
     impl_error!(deserialize_seq(), "seq");
     impl_error!(deserialize_seq_fixed_size(usize), "seq_fixed_size");
-    impl_error!(deserialize_struct_field(), "struct_field");
     impl_error!(deserialize_unit_struct(&'static str), "unit_struct");
     impl_error!(deserialize_newtype_struct(&'static str), "newtype_struct");
     impl_error!(deserialize_tuple_struct(&'static str, usize), "tuple_struct");
-    impl_error!(deserialize_tuple(usize), "tuple");
     impl_error!(deserialize_ignored_any(), "ignored_any");
 }
 
@@ -249,18 +335,38 @@ pub fn deserialize<T: de::Deserialize>(bytes: &[u8]) -> Result<T, DecoderError> 
 
 #[cfg(test)]
 mod test {
-    use super::deserialize;
+    use super::{deserialize, de_inner, de_bytes};
+    use serde::bytes::ByteBuf;
 
     #[derive(Debug, PartialEq, Deserialize)]
-    struct Test1 {
+    struct TestStruct {
         pkt_len: u32,
         pad_len: u8
     }
 
     #[derive(Debug, PartialEq, Deserialize)]
-    struct Test2 {
+    struct OuterStruct {
+        #[serde(deserialize_with = "de_bytes")]
         data: Vec<u8>,
-        inner: Test1
+        #[serde(deserialize_with = "de_inner")]
+        inner: TestStruct
+    }
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    enum TestEnum {
+        #[serde(rename = "newtype")]
+        NewtypeVariant(u32),
+        #[serde(rename = "tuple")]
+        TupleVariant(String, String),
+        #[serde(rename = "struct")]
+        StructVariant { a: u32, b: String }
+    }
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct EnumWrapper {
+        #[serde(deserialize_with = "de_inner")]
+        e: TestEnum,
+        flag: bool
     }
 
     #[test]
@@ -270,30 +376,97 @@ mod test {
     }
 
     #[test]
+    fn decode_false() {
+        let val = deserialize::<bool>(&[0]);
+        assert_eq!(Ok(false), val);
+    }
+
+    #[test]
+    fn decode_true() {
+        let val = deserialize::<bool>(&[1]);
+        assert_eq!(Ok(true), val);
+    }
+
+    #[test]
     fn decode_u8() {
         let val = deserialize::<u8>(&[30]);
         assert_eq!(Ok(30), val);
     }
 
     #[test]
-    fn decode_bytes() {
-        let val = deserialize::<Vec<u8>>(&[0, 0, 0, 4, b't', b'e', b's', b't']);
-        assert_eq!(Ok(b"test".to_vec()), val);
+    fn decode_bytebuf() {
+        let val = deserialize::<ByteBuf>(&[0, 0, 0, 4, b't', b'e', b's', b't']);
+        assert_eq!(Ok(b"test".to_vec().into()), val);
+    }
+
+    #[test]
+    fn decode_string() {
+        let val = deserialize::<String>(&[0, 0, 0, 4, b't', b'e', b's', b't']);
+        assert_eq!(Ok("test".into()), val);
     }
 
     #[test]
     fn decode_struct() {
-        let val = deserialize::<Test1>(&[0, 1, 2, 3, 30]);
-        assert_eq!(Ok(Test1 { pkt_len: 0x010203, pad_len: 30 }), val);
+        let val = deserialize::<TestStruct>(&[0, 1, 2, 3, 30]);
+        assert_eq!(Ok(TestStruct { pkt_len: 0x010203, pad_len: 30 }), val);
     }
 
     #[test]
     fn decode_inner_struct() {
-        let val = deserialize::<Test2>(&[0, 0, 0, 4, b't', b'e', b's', b't', 0, 0, 0, 5, 0, 1, 2, 3, 30]);
-        let expected = Test2 {
+        let val = deserialize::<OuterStruct>(&[0, 0, 0, 4, b't', b'e', b's', b't', 0, 0, 0, 5, 0, 1, 2, 3, 30]);
+        let expected = OuterStruct {
             data: b"test".to_vec(),
-            inner: Test1 { pkt_len: 0x010203, pad_len: 30 }
+            inner: TestStruct { pkt_len: 0x010203, pad_len: 30 }
         };
+        assert_eq!(Ok(expected), val);
+    }
+
+    #[test]
+    fn decode_enum_newtype() {
+        let data = &[0, 0, 0, 7, b'n', b'e', b'w', b't', b'y', b'p', b'e', 0, 0, 1, 2];
+        let val = deserialize::<TestEnum>(data);
+        let expected = TestEnum::NewtypeVariant(0x0102);
+        assert_eq!(Ok(expected), val);
+    }
+
+    #[test]
+    fn decode_enum_tuple() {
+        let data = &[0, 0, 0, 5, b't', b'u', b'p', b'l', b'e',
+            0, 0, 0, 1, b'a',
+            0, 0, 0, 2, b'b', b'c'
+        ];
+        let val = deserialize::<TestEnum>(data);
+        let expected = TestEnum::TupleVariant("a".to_string(), "bc".to_string());
+        assert_eq!(Ok(expected), val);
+    }
+
+    #[test]
+    fn decode_enum_struct() {
+        let data = &[0, 0, 0, 6, b's', b't', b'r', b'u', b'c', b't',
+            0, 0, 1, 2,
+            0, 0, 0, 1, b'x',
+        ];
+        let val = deserialize::<TestEnum>(data);
+        let expected = TestEnum::StructVariant { a: 0x0102, b: "x".to_string() };
+        assert_eq!(Ok(expected), val);
+    }
+
+    #[test]
+    fn decode_wrapped_enum() {
+        let data = &[
+            0, 0, 0, 19,
+            0, 0, 0, 6, b's', b't', b'r', b'u', b'c', b't',
+            0, 0, 1, 2,
+            0, 0, 0, 1, b'x',
+            1
+        ];
+
+        let val = deserialize::<EnumWrapper>(data);
+        let expected = EnumWrapper {
+            e: TestEnum::StructVariant { a: 0x0102, b: "x".to_string() },
+            flag: true
+        };
+
         assert_eq!(Ok(expected), val);
     }
 }
