@@ -107,14 +107,19 @@ impl<'a> BinaryDecoder<'a> {
     }
 }
 
+macro_rules! impl_error {
+    ($func:ident($($arg:ty),*), $errtype:expr) => {
+        #[inline]
+        fn $func<__V>(&mut self, $(_: $arg,)* visitor: __V) -> ::std::result::Result<__V::Value, Self::Error>
+            where __V: de::Visitor
+            {
+                Err(DecoderError::UnsupportedType($errtype))
+            }
+    };
+}
+
 impl<'a> de::Deserializer for BinaryDecoder<'a> {
     type Error = DecoderError;
-
-    fn deserialize<V>(&mut self, _visitor: V) -> Result<V::Value, DecoderError>
-        where V: de::Visitor
-    {
-        Err(DecoderError::UnsupportedType("struct"))
-    }
 
     fn deserialize_u32<V>(&mut self, mut visitor: V) -> Result<V::Value, DecoderError>
         where V: de::Visitor
@@ -151,7 +156,7 @@ impl<'a> de::Deserializer for BinaryDecoder<'a> {
     fn deserialize_bytes<V>(&mut self, mut visitor: V) -> Result<V::Value, DecoderError>
         where V: de::Visitor
     {
-        self.parse_bytes().and_then(|bytes| visitor.visit_bytes(bytes))
+        self.parse_bytes().and_then(|bytes| visitor.visit_byte_buf(bytes.into()))
     }
 
     fn deserialize_string<V>(&mut self, mut visitor: V) -> Result<V::Value, DecoderError>
@@ -166,7 +171,7 @@ impl<'a> de::Deserializer for BinaryDecoder<'a> {
 
     fn deserialize_struct<V>(&mut self,
                              _name: &'static str,
-                             _fields: &'static [&'static str],
+                             fields: &'static [&'static str],
                              mut visitor: V)
             -> Result<V::Value, DecoderError>
         where V: de::Visitor
@@ -200,70 +205,41 @@ impl<'a> de::Deserializer for BinaryDecoder<'a> {
             }
         }
 
-        let len = try!(de::Deserialize::deserialize(self));
-
-        visitor.visit_seq(SeqVisitor { deserializer: self, len: len })
+        visitor.visit_seq(SeqVisitor { deserializer: self, len: fields.len() })
     }
 
-    fn deserialize_struct_field<V>(&mut self,
-                                   _visitor: V) -> Result<V::Value, DecoderError>
-        where V: de::Visitor,
+    fn deserialize_enum<V>(&mut self,
+                           _name: &'static str,
+                           _variants: &'static [&'static str],
+                           _visitor: V) -> Result<V::Value, Self::Error>
+        where V: de::EnumVisitor
     {
-        let message = "bincode does not support Deserializer::deserialize_struct_field";
-        Err(DecoderError::Serde(de::value::Error::Custom(message.into())))
+        Err(DecoderError::UnsupportedType("enum"))
     }
 
-    fn deserialize_seq<V>(&mut self,
-                          mut visitor: V) -> Result<V::Value, DecoderError>
-        where V: de::Visitor,
-    {
-        struct SeqVisitor<'a, 'b: 'a> {
-            deserializer: &'a mut BinaryDecoder<'b>,
-            len: usize,
-        }
-
-        impl<'a, 'b: 'a> de::SeqVisitor for SeqVisitor<'a, 'b> {
-            type Error = DecoderError;
-
-            fn visit<T>(&mut self) -> Result<Option<T>, Self::Error>
-                where T: de::Deserialize,
-            {
-                if self.len > 0 {
-                    self.len -= 1;
-                    let value = try!(de::Deserialize::deserialize(self.deserializer));
-                    Ok(Some(value))
-                } else {
-                    Ok(None)
-                }
-            }
-
-            fn end(&mut self) -> Result<(), Self::Error> {
-                if self.len == 0 {
-                    Ok(())
-                } else {
-                    Err(DecoderError::Serde(de::value::Error::Custom("expected end".into())))
-                }
-            }
-        }
-
-        let len = try!(de::Deserialize::deserialize(self));
-
-        visitor.visit_seq(SeqVisitor { deserializer: self, len: len })
-    }
-
-    fn deserialize_seq_fixed_size<V>(&mut self,
-                                     _len: usize,
-                                     mut visitor: V) -> Result<V::Value, DecoderError>
-        where V: de::Visitor,
-    {
-        self.deserialize_seq(visitor)
-    }
-
-    forward_to_deserialize! {
-        usize u16 u64 isize i8 i16 i32 i64 f32 f64 char option
-        unit map unit_struct newtype_struct
-        tuple_struct tuple enum ignored_any
-    }
+    impl_error!(deserialize(), "struct");
+    impl_error!(deserialize_usize(), "usize");
+    impl_error!(deserialize_u16(), "u16");
+    impl_error!(deserialize_u64(), "u64");
+    impl_error!(deserialize_isize(), "isize");
+    impl_error!(deserialize_i8(), "i8");
+    impl_error!(deserialize_i16(), "i16");
+    impl_error!(deserialize_i32(), "i32");
+    impl_error!(deserialize_i64(), "i64");
+    impl_error!(deserialize_f32(), "f32");
+    impl_error!(deserialize_f64(), "f64");
+    impl_error!(deserialize_char(), "char");
+    impl_error!(deserialize_option(), "option");
+    impl_error!(deserialize_unit(), "unit");
+    impl_error!(deserialize_map(), "map");
+    impl_error!(deserialize_seq(), "seq");
+    impl_error!(deserialize_seq_fixed_size(usize), "seq_fixed_size");
+    impl_error!(deserialize_struct_field(), "struct_field");
+    impl_error!(deserialize_unit_struct(&'static str), "unit_struct");
+    impl_error!(deserialize_newtype_struct(&'static str), "newtype_struct");
+    impl_error!(deserialize_tuple_struct(&'static str, usize), "tuple_struct");
+    impl_error!(deserialize_tuple(usize), "tuple");
+    impl_error!(deserialize_ignored_any(), "ignored_any");
 }
 
 pub fn deserialize<T: de::Deserialize>(bytes: &[u8]) -> Result<T, DecoderError> {
@@ -281,6 +257,12 @@ mod test {
         pad_len: u8
     }
 
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct Test2 {
+        data: Vec<u8>,
+        inner: Test1
+    }
+
     #[test]
     fn decode_u32() {
         let val = deserialize::<u32>(&[0, 1, 2, 3]);
@@ -291,5 +273,27 @@ mod test {
     fn decode_u8() {
         let val = deserialize::<u8>(&[30]);
         assert_eq!(Ok(30), val);
+    }
+
+    #[test]
+    fn decode_bytes() {
+        let val = deserialize::<Vec<u8>>(&[0, 0, 0, 4, b't', b'e', b's', b't']);
+        assert_eq!(Ok(b"test".to_vec()), val);
+    }
+
+    #[test]
+    fn decode_struct() {
+        let val = deserialize::<Test1>(&[0, 1, 2, 3, 30]);
+        assert_eq!(Ok(Test1 { pkt_len: 0x010203, pad_len: 30 }), val);
+    }
+
+    #[test]
+    fn decode_inner_struct() {
+        let val = deserialize::<Test2>(&[0, 0, 0, 4, b't', b'e', b's', b't', 0, 0, 0, 5, 0, 1, 2, 3, 30]);
+        let expected = Test2 {
+            data: b"test".to_vec(),
+            inner: Test1 { pkt_len: 0x010203, pad_len: 30 }
+        };
+        assert_eq!(Ok(expected), val);
     }
 }
