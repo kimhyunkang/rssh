@@ -45,7 +45,7 @@ macro_rules! test_codec {
 #[cfg(test)]
 mod test {
     pub use super::decoder::{deserialize, de_inner, de_bytes};
-    pub use super::encoder::serialize;
+    pub use super::encoder::{serialize, ser_inner, ser_bytes};
     pub use serde::bytes::ByteBuf;
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -54,15 +54,15 @@ mod test {
         pad_len: u8
     }
 
-    #[derive(Debug, PartialEq, Deserialize)]
+    #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct OuterStruct {
-        #[serde(deserialize_with = "de_bytes")]
+        #[serde(deserialize_with = "de_bytes", serialize_with = "ser_bytes")]
         data: Vec<u8>,
-        #[serde(deserialize_with = "de_inner")]
+        #[serde(deserialize_with = "de_inner", serialize_with = "ser_inner")]
         inner: TestStruct
     }
 
-    #[derive(Debug, PartialEq, Deserialize)]
+    #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub enum TestEnum {
         #[serde(rename = "newtype")]
         NewtypeVariant(u32),
@@ -72,9 +72,9 @@ mod test {
         StructVariant { a: u32, b: String }
     }
 
-    #[derive(Debug, PartialEq, Deserialize)]
+    #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct EnumWrapper {
-        #[serde(deserialize_with = "de_inner")]
+        #[serde(deserialize_with = "de_inner", serialize_with = "ser_inner")]
         e: TestEnum,
         flag: bool
     }
@@ -102,62 +102,51 @@ mod test {
         &[0, 1, 2, 3, 30]
     );
 
-    #[test]
-    fn decode_inner_struct() {
-        let val = deserialize::<OuterStruct>(&[0, 0, 0, 4, b't', b'e', b's', b't', 0, 0, 0, 5, 0, 1, 2, 3, 30]);
-        let expected = OuterStruct {
+    test_codec!(
+        inner_struct,
+        OuterStruct {
             data: b"test".to_vec(),
             inner: TestStruct { pkt_len: 0x010203, pad_len: 30 }
-        };
-        assert_eq!(Ok(expected), val);
-    }
+        },
+        &[0, 0, 0, 4, b't', b'e', b's', b't', 0, 0, 0, 5, 0, 1, 2, 3, 30]
+    );
 
-    #[test]
-    fn decode_enum_newtype() {
-        let data = &[0, 0, 0, 7, b'n', b'e', b'w', b't', b'y', b'p', b'e', 0, 0, 1, 2];
-        let val = deserialize::<TestEnum>(data);
-        let expected = TestEnum::NewtypeVariant(0x0102);
-        assert_eq!(Ok(expected), val);
-    }
+    test_codec!(
+        enum_newtype,
+        TestEnum::NewtypeVariant(0x0102),
+        &[0, 0, 0, 7, b'n', b'e', b'w', b't', b'y', b'p', b'e', 0, 0, 1, 2]
+    );
 
-    #[test]
-    fn decode_enum_tuple() {
-        let data = &[0, 0, 0, 5, b't', b'u', b'p', b'l', b'e',
+    test_codec!(
+        enum_tuple,
+        TestEnum::TupleVariant("a".to_string(), "bc".to_string()),
+        &[0, 0, 0, 5, b't', b'u', b'p', b'l', b'e',
             0, 0, 0, 1, b'a',
             0, 0, 0, 2, b'b', b'c'
-        ];
-        let val = deserialize::<TestEnum>(data);
-        let expected = TestEnum::TupleVariant("a".to_string(), "bc".to_string());
-        assert_eq!(Ok(expected), val);
-    }
+        ]
+    );
 
-    #[test]
-    fn decode_enum_struct() {
-        let data = &[0, 0, 0, 6, b's', b't', b'r', b'u', b'c', b't',
+    test_codec!(
+        enum_struct,
+        TestEnum::StructVariant { a: 0x0102, b: "x".to_string() },
+        &[0, 0, 0, 6, b's', b't', b'r', b'u', b'c', b't',
             0, 0, 1, 2,
             0, 0, 0, 1, b'x',
-        ];
-        let val = deserialize::<TestEnum>(data);
-        let expected = TestEnum::StructVariant { a: 0x0102, b: "x".to_string() };
-        assert_eq!(Ok(expected), val);
-    }
+        ]
+    );
 
-    #[test]
-    fn decode_wrapped_enum() {
-        let data = &[
+    test_codec!(
+        wrapped_enum,
+        EnumWrapper {
+            e: TestEnum::StructVariant { a: 0x0102, b: "x".to_string() },
+            flag: true
+        },
+        &[
             0, 0, 0, 19,
             0, 0, 0, 6, b's', b't', b'r', b'u', b'c', b't',
             0, 0, 1, 2,
             0, 0, 0, 1, b'x',
             1
-        ];
-
-        let val = deserialize::<EnumWrapper>(data);
-        let expected = EnumWrapper {
-            e: TestEnum::StructVariant { a: 0x0102, b: "x".to_string() },
-            flag: true
-        };
-
-        assert_eq!(Ok(expected), val);
-    }
+        ]
+    );
 }

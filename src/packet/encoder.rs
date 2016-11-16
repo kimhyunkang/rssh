@@ -90,17 +90,20 @@ impl ser::Serializer for BinaryEncoder {
     type StructState = ();
     type StructVariantState = ();
 
+    #[inline]
     fn serialize_bool(&mut self, v: bool) -> Result<(), EncoderError> {
         let b = if v { 1 } else { 0 };
         self.buf.push(b);
         Ok(())
     }
 
+    #[inline]
     fn serialize_u8(&mut self, v: u8) -> Result<(), EncoderError> {
         self.buf.push(v);
         Ok(())
     }
 
+    #[inline]
     fn serialize_u32(&mut self, v: u32) -> Result<(), EncoderError> {
         self.buf.push((v >> 24) as u8);
         self.buf.push((v >> 16) as u8);
@@ -109,10 +112,12 @@ impl ser::Serializer for BinaryEncoder {
         Ok(())
     }
 
+    #[inline]
     fn serialize_str(&mut self, v: &str) -> Result<(), EncoderError> {
         self.serialize_bytes(v.as_ref())
     }
 
+    #[inline]
     fn serialize_bytes(&mut self, v: &[u8]) -> Result<(), EncoderError> {
         if v.len() > 0xffffffff {
             return Err(EncoderError::DataTooLarge(v.len()))
@@ -123,22 +128,141 @@ impl ser::Serializer for BinaryEncoder {
         Ok(())
     }
 
-    fn serialize_struct(&mut self, _name: &'static str, _len: usize)
+    #[inline]
+    fn serialize_newtype_variant<T>(&mut self, 
+                                    name: &'static str,
+                                    index: usize,
+                                    variant_name: &'static str,
+                                    value: T)
+            -> Result<(), EncoderError>
+        where T: ser::Serialize
+    {
+        let mut st = try!(self.serialize_tuple_variant(name, index, variant_name, 1));
+        try!(self.serialize_tuple_variant_elt(&mut st, value));
+        self.serialize_tuple_variant_end(st)
+    }
+
+    #[inline]
+    fn serialize_tuple(&mut self, _len: usize) -> Result<(), EncoderError>
+    {
+        Ok(())
+    }
+
+    #[inline]
+    fn serialize_tuple_elt<T>(&mut self,
+                              _st: &mut (),
+                              elt: T)
+            -> Result<(), EncoderError>
+        where T: ser::Serialize
+    {
+        elt.serialize(self)
+    }
+
+    #[inline]
+    fn serialize_tuple_end(&mut self, _st: ()) -> Result<(), EncoderError> {
+        Ok(())
+    }
+
+    #[inline]
+    fn serialize_tuple_struct(&mut self,
+                              _name: &'static str,
+                              len: usize)
+            -> Result<(), EncoderError>
+    {
+        self.serialize_tuple(len)
+    }
+
+    #[inline]
+    fn serialize_tuple_struct_elt<T>(&mut self, st: &mut (), elt: T)
+            -> Result<(), EncoderError>
+        where T: ser::Serialize
+    {
+        self.serialize_tuple_elt(st, elt)
+    }
+
+    #[inline]
+    fn serialize_tuple_struct_end(&mut self, st: ()) -> Result<(), EncoderError>
+    {
+        self.serialize_tuple_end(st)
+    }
+
+    #[inline]
+    fn serialize_tuple_variant(&mut self,
+                               _name: &'static str,
+                               _index: usize,
+                               variant: &'static str,
+                               _len: usize)
+            -> Result<(), EncoderError>
+    {
+        self.serialize_bytes(variant.as_ref())
+    }
+
+    #[inline]
+    fn serialize_tuple_variant_elt<T>(&mut self,
+                                      _st: &mut (),
+                                      value: T)
+            -> Result<(), EncoderError>
+        where T: ser::Serialize
+    {
+        value.serialize(self)
+    }
+
+    #[inline]
+    fn serialize_tuple_variant_end(&mut self, _st: ())
             -> Result<(), EncoderError>
     {
         Ok(())
     }
 
-    fn serialize_struct_elt<T: ser::Serialize>(&mut self,
-                                               _st: &mut (),
-                                               _name: &'static str,
-                                               elt: T)
+    #[inline]
+    fn serialize_struct(&mut self, _name: &'static str, len: usize)
             -> Result<(), EncoderError>
+    {
+        self.serialize_tuple(len)
+    }
+
+    #[inline]
+    fn serialize_struct_elt<T>(&mut self,
+                               st: &mut (),
+                               _key: &'static str,
+                               elt: T)
+            -> Result<(), EncoderError>
+        where T: ser::Serialize
+    {
+        self.serialize_tuple_elt(st, elt)
+    }
+
+    #[inline]
+    fn serialize_struct_end(&mut self, st: ()) -> Result<(), EncoderError>
+    {
+        self.serialize_tuple_end(st)
+    }
+
+    #[inline]
+    fn serialize_struct_variant(&mut self,
+                                _name: &'static str,
+                                _index: usize,
+                                variant_name: &'static str,
+                                _len: usize)
+            -> Result<(), EncoderError>
+    {
+        self.serialize_bytes(variant_name.as_ref())
+    }
+
+    #[inline]
+    fn serialize_struct_variant_elt<T>(&mut self,
+                                       _st: &mut (),
+                                       _key: &'static str,
+                                       elt: T)
+            -> Result<(), EncoderError>
+        where T: ser::Serialize
     {
         elt.serialize(self)
     }
 
-    fn serialize_struct_end(&mut self, _st: ()) -> Result<(), EncoderError>
+    #[inline]
+    fn serialize_struct_variant_end(&mut self, _st: ())
+            -> Result<(), EncoderError>
     {
         Ok(())
     }
@@ -158,33 +282,33 @@ impl ser::Serializer for BinaryEncoder {
     impl_error!(serialize_unit_struct(&'static str), "unit_struct");
     impl_error!(serialize_unit_variant(&'static str, usize, &'static str), "unit_variant");
     impl_error!(serialize_newtype_struct<T>(&'static str, T), "newtype_struct");
-    impl_error!(serialize_newtype_variant<T>(&'static str, usize, &'static str, T), "newtype_variant");
     impl_error!(serialize_none(), "none");
     impl_error!(serialize_some<T>(T), "some");
     impl_error!(serialize_seq(Option<usize>), "seq");
     impl_error!(serialize_seq_elt<T>(&mut Self::SeqState, T), "seq_elt");
     impl_error!(serialize_seq_end(Self::SeqState), "seq_end");
     impl_error!(serialize_seq_fixed_size(usize) -> Self::SeqState, "seq_fixed_size");
-    impl_error!(serialize_tuple(usize) -> Self::TupleState, "tuple");
-    impl_error!(serialize_tuple_elt<T>(&mut Self::TupleState, T), "tuple_elt");
-    impl_error!(serialize_tuple_end(Self::TupleState), "tuple_end");
-    impl_error!(serialize_tuple_struct(&'static str, usize) -> Self::TupleStructState, "tuple_struct");
-    impl_error!(serialize_tuple_struct_elt<T>(&mut Self::TupleStructState, T), "tuple_struct_elt");
-    impl_error!(serialize_tuple_struct_end(Self::TupleStructState), "tuple_struct_end");
-    impl_error!(serialize_tuple_variant(&'static str, usize, &'static str, usize) -> Self::TupleVariantState, "tuple_variant");
-    impl_error!(serialize_tuple_variant_elt<T>(&mut Self::TupleVariantState, T), "tuple_variant_elt");
-    impl_error!(serialize_tuple_variant_end(Self::TupleVariantState), "tuple_variant_end");
     impl_error!(serialize_map(Option<usize>) -> Self::MapState, "map");
     impl_error!(serialize_map_key<T>(&mut Self::MapState, T), "map_key");
     impl_error!(serialize_map_value<T>(&mut Self::MapState, T), "map_value");
     impl_error!(serialize_map_end(Self::MapState), "map_end");
-    impl_error!(serialize_struct_variant(&'static str, usize, &'static str, usize) -> Self::StructVariantState, "struct_variant");
-    impl_error!(serialize_struct_variant_elt<T>(&mut Self::StructVariantState, &'static str, T), "struct_variant_elt");
-    impl_error!(serialize_struct_variant_end(Self::StructVariantState), "struct_variant_end");
 }
 
 pub fn serialize<T: ser::Serialize>(val: &T) -> Result<Vec<u8>, EncoderError> {
     let mut encoder = BinaryEncoder::new();
     try!(val.serialize(&mut encoder));
     Ok(encoder.buf)
+}
+
+pub fn ser_bytes<S: ser::Serializer, T: AsRef<[u8]>>(val: T, s: &mut S) -> Result<(), S::Error> {
+    s.serialize_bytes(val.as_ref())
+}
+
+pub fn ser_inner<S: ser::Serializer, T: ser::Serialize>(val: &T, s: &mut S) -> Result<(), S::Error> {
+    let bytes = match serialize(val) {
+        Ok(x) => x,
+        Err(e) => return Err(ser::Error::custom(e.to_string()))
+    };
+
+    s.serialize_bytes(bytes.as_ref())
 }
