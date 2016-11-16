@@ -10,7 +10,7 @@ extern crate serde_derive;
 extern crate tokio_core;
 
 pub mod async;
-pub mod decoder;
+pub mod packet;
 pub mod handshake;
 pub mod transport;
 
