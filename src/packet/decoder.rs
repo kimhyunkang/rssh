@@ -13,6 +13,7 @@ pub struct BinaryDecoder<'a> {
 pub enum DecoderError {
     UnsupportedType(&'static str),
     UnexpectedEOF,
+    TrailingData,
     NonBoolean,
     Utf8Error(str::Utf8Error),
     Serde(de::value::Error)
@@ -23,6 +24,7 @@ impl Error for DecoderError {
         match *self {
             DecoderError::UnsupportedType(_) => "Unsupported Type",
             DecoderError::UnexpectedEOF => "Unexpected EOF",
+            DecoderError::TrailingData => "Trailing Data",
             DecoderError::NonBoolean => "Met non-boolean value",
             DecoderError::Utf8Error(ref e) => Error::description(e),
             DecoderError::Serde(ref e) => e.description(),
@@ -31,11 +33,9 @@ impl Error for DecoderError {
 
     fn cause(&self) -> Option<&Error> {
         match *self {
-            DecoderError::UnsupportedType(_) => None,
-            DecoderError::UnexpectedEOF => None,
-            DecoderError::NonBoolean => None,
             DecoderError::Utf8Error(ref e) => e.cause(),
             DecoderError::Serde(ref e) => e.cause(),
+            _ => None
         }
     }
 }
@@ -55,6 +55,7 @@ impl fmt::Display for DecoderError {
         match *self {
             DecoderError::UnsupportedType(ref name) => write!(f, "UnsupportedType({})", name),
             DecoderError::UnexpectedEOF => write!(f, "Unexpected EOF"),
+            DecoderError::TrailingData => write!(f, "Trailing Data"),
             DecoderError::NonBoolean => write!(f, "NonBoolean"),
             DecoderError::Utf8Error(ref e) => write!(f, "Utf8Error: {}", e),
             DecoderError::Serde(ref e) => write!(f, "Serde: {}", e)
@@ -105,6 +106,11 @@ impl<'a> BinaryDecoder<'a> {
             self.pos += len;
             Ok(&self.buf[old_pos .. self.pos])
         }
+    }
+
+    #[inline]
+    fn is_end_of_data(self) -> bool {
+        self.buf.len() == self.pos
     }
 }
 
@@ -354,5 +360,30 @@ impl<'a> de::Deserializer for BinaryDecoder<'a> {
 
 pub fn deserialize<T: de::Deserialize>(bytes: &[u8]) -> Result<T, DecoderError> {
     let mut decoder = BinaryDecoder::new(bytes);
-    de::Deserialize::deserialize(&mut decoder)
+    de::Deserialize::deserialize(&mut decoder).and_then(|x| {
+        if decoder.is_end_of_data() {
+            Ok(x)
+        } else {
+            Err(DecoderError::TrailingData)
+        }
+    })
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    pub struct TestStruct {
+        #[serde(deserialize_with = "de_bytes")]
+        data: Vec<u8>,
+        flag: bool
+    }
+
+    #[test]
+    fn detect_trailing_data() {
+        let data = b"\x00\x00\x00\x04test\x01trailing";
+        let res = deserialize::<TestStruct>(data);
+        assert_eq!(Err(DecoderError::TrailingData), res);
+    }
 }
