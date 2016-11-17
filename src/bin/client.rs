@@ -17,7 +17,7 @@ use tokio_core::net::TcpStream;
 use tokio_core::reactor::Core;
 
 fn main() {
-    let addr = "127.0.0.1:22".parse::<SocketAddr>().unwrap();
+    let addr = "127.0.0.1:2022".parse::<SocketAddr>().unwrap();
 
     let mut l = Core::new().unwrap();
     let handle = l.handle();
@@ -65,7 +65,7 @@ fn main() {
         let mut rng = thread_rng();
         println!("got algorithm neg: {:?}", neg);
         rssh::handshake::ecdh_sha2_nistp256_client(reader, writer, &mut rng)
-    }).map(|(_, _, buf)| {
+    }).map(|(_, _, buf, shared_secret)| {
         println!("got key exchange: {:?}", buf);
     }).map_err(|e| {
         panic!("error: {}", e);
