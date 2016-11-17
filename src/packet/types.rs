@@ -107,6 +107,12 @@ pub struct AlgorithmNegotiation {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct KexInit {
+    #[serde(deserialize_with = "de_bytes", serialize_with = "ser_bytes")]
+    pub e: Vec<u8>
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct KexReply {
     #[serde(deserialize_with = "de_inner", serialize_with = "ser_inner")]
     pub server_cert: ServerCert,

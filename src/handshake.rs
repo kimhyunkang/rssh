@@ -1,7 +1,7 @@
 use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
-use packet::types::{AlgorithmNegotiation, KexReply};
-use packet::{deserialize, serialize};
+use packet::types::{AlgorithmNegotiation, KexInit, KexReply};
+use packet::{deserialize, deserialize_msg, serialize, serialize_msg};
 use transport::{unencrypted_read_packet, unencrypted_write_packet};
 
 use std::{fmt, io, str};
@@ -10,7 +10,7 @@ use futures::Future;
 use rand::Rng;
 use tokio_core::io::{flush, read_until, write_all};
 
-use ::{SSH_MSG_KEYINIT, SSH_MSG_KEXDH_REPLY};
+use ::{SSH_MSG_KEYINIT, SSH_MSG_KEXDH_INIT, SSH_MSG_KEXDH_REPLY};
 
 #[derive(Debug)]
 pub enum HandshakeError {
@@ -118,23 +118,24 @@ pub fn ecdh_sha2_nistp256_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: A
         -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, KexReply), Error=HandshakeError>>
     where R: Read + Send + 'static, W: Write + Send + 'static, RNG: Rng
 {
-    let kex_message: Vec<u8> = vec![30, 0, 0, 0, 65, 4, 127, 202, 122, 190, 158, 103, 140, 201, 18,
+    let kex_init = KexInit { e: vec![4, 127, 202, 122, 190, 158, 103, 140, 201, 18,
         153, 153, 33, 222, 230, 168, 75, 68, 68, 222, 48, 233, 43, 40, 242, 202, 142, 228, 170,
         46, 206, 82, 75, 42, 33, 123, 27, 56, 215, 137, 120, 141, 143, 52, 143, 232, 198, 33,
-        61, 72, 15, 150, 124, 45, 57, 132, 180, 23, 75, 252, 29, 188, 149, 165, 71];
+        61, 72, 15, 150, 124, 45, 57, 132, 180, 23, 75, 252, 29, 188, 149, 165, 71] };
+    let kex_message = serialize_msg(SSH_MSG_KEXDH_INIT, &kex_init).unwrap();
 
     let w = unencrypted_write_packet(writer, kex_message, rng).and_then(|writer| {
         flush(writer)
     }).map_err(|e| e.into());
     
     let r = unencrypted_read_packet(reader).map_err(|e| e.into()).and_then(|(reader, payload)| {
-        if payload[0] == SSH_MSG_KEXDH_REPLY {
-            match deserialize::<KexReply>(&payload[1..]) {
-                Ok(reply) => Ok((reader, reply)),
-                Err(e) => Err(HandshakeError::InvalidKexReply(e.to_string()))
-            }
-        } else {
-            Err(HandshakeError::InvalidKexReply("SSH_MSG_KEXDH_REPLY not received".to_string()))
+        match deserialize_msg::<KexReply>(&payload) {
+            Ok((msg_key, reply)) => if msg_key == SSH_MSG_KEXDH_REPLY {
+                Ok((reader, reply))
+            } else {
+                Err(HandshakeError::InvalidKexReply("SSH_MSG_KEXDH_REPLY not received".to_string()))
+            },
+            Err(e) => Err(HandshakeError::InvalidKexReply(e.to_string()))
         }
     });
 

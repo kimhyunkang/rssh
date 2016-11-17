@@ -2,8 +2,8 @@ pub mod decoder;
 pub mod encoder;
 pub mod types;
 
-pub use self::decoder::{BinaryDecoder, deserialize};
-pub use self::encoder::{BinaryEncoder, serialize};
+pub use self::decoder::{BinaryDecoder, deserialize, deserialize_msg};
+pub use self::encoder::{BinaryEncoder, serialize, serialize_msg};
 
 #[cfg(test)]
 mod test {

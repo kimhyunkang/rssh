@@ -373,6 +373,17 @@ pub fn deserialize<T: de::Deserialize>(bytes: &[u8]) -> Result<T, DecoderError> 
     })
 }
 
+pub fn deserialize_msg<T: de::Deserialize>(bytes: &[u8]) -> Result<(u8, T), DecoderError> {
+    let mut decoder = BinaryDecoder::new(&bytes[1..]);
+    de::Deserialize::deserialize(&mut decoder).and_then(|x| {
+        if decoder.is_end_of_data() {
+            Ok((bytes[0], x))
+        } else {
+            Err(DecoderError::TrailingData)
+        }
+    })
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

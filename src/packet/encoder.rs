@@ -301,6 +301,15 @@ pub fn serialize<T: ser::Serialize>(val: &T) -> Result<Vec<u8>, EncoderError> {
     Ok(encoder.buf)
 }
 
+pub fn serialize_msg<T: ser::Serialize>(msg_key: u8, val: &T) -> Result<Vec<u8>, EncoderError> {
+    use serde::ser::Serializer;
+
+    let mut encoder = BinaryEncoder::new();
+    try!(encoder.serialize_u8(msg_key));
+    try!(val.serialize(&mut encoder));
+    Ok(encoder.buf)
+}
+
 #[inline]
 pub fn ser_bytes<S: ser::Serializer, T: AsRef<[u8]>>(val: T, s: &mut S) -> Result<(), S::Error> {
     s.serialize_bytes(val.as_ref())
