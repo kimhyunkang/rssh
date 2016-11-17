@@ -4,46 +4,46 @@ pub mod encoder;
 pub use self::decoder::BinaryDecoder;
 pub use self::encoder::BinaryEncoder;
 
-macro_rules! test_codec {
-    ($mod_name:ident, $val:expr, $bytes:expr) => {
-        mod $mod_name {
-            use super::*;
+#[cfg(test)]
+mod test {
+    macro_rules! test_codec {
+        ($mod_name:ident, $val:expr, $bytes:expr) => {
+            mod $mod_name {
+                use super::*;
 
-            #[test]
-            fn decode() {
-                let result = deserialize($bytes);
-                assert_eq!(Ok($val), result);
+                #[test]
+                fn decode() {
+                    let result = deserialize($bytes);
+                    assert_eq!(Ok($val), result);
+                }
+
+                #[test]
+                fn encode() {
+                    let result = serialize(&$val);
+                    assert_eq!(Ok($bytes.to_vec()), result);
+                }
             }
+        };
 
-            #[test]
-            fn encode() {
-                let result = serialize(&$val);
-                assert_eq!(Ok($bytes.to_vec()), result);
-            }
-        }
-    };
+        ($mod_name:ident<$tyname:ident>, $val:expr, $bytes:expr) => {
+            mod $mod_name {
+                use super::*;
 
-    ($mod_name:ident<$tyname:ident>, $val:expr, $bytes:expr) => {
-        mod $mod_name {
-            use super::*;
+                #[test]
+                fn decode() {
+                    let result = deserialize::<$tyname>($bytes);
+                    assert_eq!(Ok($val), result);
+                }
 
-            #[test]
-            fn decode() {
-                let result = deserialize::<$tyname>($bytes);
-                assert_eq!(Ok($val), result);
-            }
-
-            #[test]
-            fn encode() {
-                let result = serialize::<$tyname>(&$val);
-                assert_eq!(Ok($bytes.to_vec()), result);
+                #[test]
+                fn encode() {
+                    let result = serialize::<$tyname>(&$val);
+                    assert_eq!(Ok($bytes.to_vec()), result);
+                }
             }
         }
     }
-}
 
-#[cfg(test)]
-mod test {
     pub use super::decoder::{deserialize, de_inner, de_bytes, de_name_list};
     pub use super::encoder::{serialize, ser_inner, ser_bytes, ser_name_list};
     pub use serde::bytes::ByteBuf;
