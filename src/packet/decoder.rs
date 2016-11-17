@@ -166,7 +166,11 @@ pub fn de_name_list<D: de::Deserializer, T: Name>(d: &mut D) -> Result<Vec<T>, D
 
         fn visit_str<E>(&mut self, v: &str) -> Result<Vec<U>, E>
         {
-            Ok(v.split(',').map(|s| s.into()).collect())
+            if v.len() == 0 {
+                Ok(Vec::new())
+            } else {
+                Ok(v.split(',').map(|s| s.into()).collect())
+            }
         }
     }
 

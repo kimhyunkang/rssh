@@ -212,6 +212,15 @@ mod test {
     );
 
     test_codec!(
+        empty_name_list,
+        NameListWrapper {
+            e: vec![],
+            f: b"test-name".to_vec()
+        },
+        b"\x00\x00\x00\x00\x00\x00\x00\x09test-name"
+    );
+
+    test_codec!(
         name_list,
         NameListWrapper {
             e: vec![NameEnum::TestName, NameEnum::Unknown("unknown".to_string()), NameEnum::AnotherName],
