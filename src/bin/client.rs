@@ -6,7 +6,7 @@ extern crate tokio_core;
 
 use rssh::async::bufreader::AsyncBufReader;
 use rssh::async::bufwriter::AsyncBufWriter;
-use rssh::handshake::AlgorithmNegotiation;
+use rssh::packet::types::{AlgorithmNegotiation, KexAlgorithm, ServerHostKeyAlgorithm, EncryptionAlgorithm, MacAlgorithm, CompressionAlgorithm};
 
 use std::net::SocketAddr;
 
@@ -40,17 +40,18 @@ fn main() {
         println!("got hello message: {}", String::from_utf8_lossy(&version));
 
         let supported_algorithms = AlgorithmNegotiation {
-            kex_algorithms: vec!["ecdh-sha2-nistp256".to_string()],
-            server_host_key_algorithms: vec!["ssh-rsa".to_string()],
-            encryption_algorithms_client_to_server: vec!["aes256-cbc".to_string()],
-            encryption_algorithms_server_to_client: vec!["aes256-cbc".to_string()],
-            mac_algorithms_client_to_server: vec!["hmac-sha1".to_string()],
-            mac_algorithms_server_to_client: vec!["hmac-sha1".to_string()],
-            compression_algorithms_client_to_server: vec!["none".to_string()],
-            compression_algorithms_server_to_client: vec!["none".to_string()],
+            kex_algorithms: vec![KexAlgorithm::ECDH_SHA2_NISTP256],
+            server_host_key_algorithms: vec![ServerHostKeyAlgorithm::SSH_RSA],
+            encryption_algorithms_client_to_server: vec![EncryptionAlgorithm::AES256_CBC],
+            encryption_algorithms_server_to_client: vec![EncryptionAlgorithm::AES256_CBC],
+            mac_algorithms_client_to_server: vec![MacAlgorithm::HMAC_SHA2_256],
+            mac_algorithms_server_to_client: vec![MacAlgorithm::HMAC_SHA2_256],
+            compression_algorithms_client_to_server: vec![CompressionAlgorithm::NONE],
+            compression_algorithms_server_to_client: vec![CompressionAlgorithm::NONE],
             languages_client_to_server: vec![],
             languages_server_to_client: vec![],
-            first_kex_packet_follows: false
+            first_kex_packet_follows: false,
+            reserved: 0
         };
 
         let mut rng = thread_rng();
