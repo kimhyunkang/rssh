@@ -1,8 +1,9 @@
 pub mod decoder;
 pub mod encoder;
+pub mod types;
 
-pub use self::decoder::BinaryDecoder;
-pub use self::encoder::BinaryEncoder;
+pub use self::decoder::{BinaryDecoder, deserialize};
+pub use self::encoder::{BinaryEncoder, serialize};
 
 #[cfg(test)]
 mod test {
@@ -70,7 +71,13 @@ mod test {
         #[serde(rename = "tuple")]
         TupleVariant(String, String),
         #[serde(rename = "struct")]
-        StructVariant { a: u32, b: String }
+        StructVariant { a: u32, b: String },
+        #[serde(rename = "bytes-struct")]
+        BytesStruct {
+            #[serde(deserialize_with = "de_bytes", serialize_with = "ser_bytes")]
+            a: Vec<u8>,
+            b: bool
+        }
     }
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -194,6 +201,12 @@ mod test {
             0, 0, 1, 2,
             0, 0, 0, 1, b'x',
         ]
+    );
+
+    test_codec!(
+        enum_bytes_in_struct,
+        TestEnum::BytesStruct { a: b"test".to_vec(), b: true },
+        b"\x00\x00\x00\x0cbytes-struct\x00\x00\x00\x04test\x01"
     );
 
     test_codec!(
