@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write;
 
 use serde::ser;
 
@@ -300,6 +301,7 @@ pub fn serialize<T: ser::Serialize>(val: &T) -> Result<Vec<u8>, EncoderError> {
     Ok(encoder.buf)
 }
 
+#[inline]
 pub fn ser_bytes<S: ser::Serializer, T: AsRef<[u8]>>(val: T, s: &mut S) -> Result<(), S::Error> {
     s.serialize_bytes(val.as_ref())
 }
@@ -311,4 +313,16 @@ pub fn ser_inner<S: ser::Serializer, T: ser::Serialize>(val: &T, s: &mut S) -> R
     };
 
     s.serialize_bytes(bytes.as_ref())
+}
+
+#[inline]
+pub fn ser_name_list<S: ser::Serializer, T: AsRef<str>, V: AsRef<[T]>>(val: V, s: &mut S) -> Result<(), S::Error> {
+    let mut buf = String::new();
+    for v in val.as_ref().iter() {
+        if buf.len() != 0 {
+            buf.write_str(",").unwrap();
+        }
+        buf.write_str(v.as_ref()).unwrap();
+    }
+    s.serialize_bytes(buf.as_bytes())
 }

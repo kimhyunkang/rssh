@@ -44,9 +44,10 @@ macro_rules! test_codec {
 
 #[cfg(test)]
 mod test {
-    pub use super::decoder::{deserialize, de_inner, de_bytes};
-    pub use super::encoder::{serialize, ser_inner, ser_bytes};
+    pub use super::decoder::{deserialize, de_inner, de_bytes, de_name_list};
+    pub use super::encoder::{serialize, ser_inner, ser_bytes, ser_name_list};
     pub use serde::bytes::ByteBuf;
+    pub use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct TestStruct {
@@ -77,6 +78,66 @@ mod test {
         #[serde(deserialize_with = "de_inner", serialize_with = "ser_inner")]
         e: TestEnum,
         flag: bool
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum NameEnum {
+        TestName,
+        AnotherName,
+        Unknown(String)
+    }
+
+    impl AsRef<str> for NameEnum {
+        fn as_ref(&self) -> &str {
+            match *self {
+                NameEnum::TestName => "test-name",
+                NameEnum::AnotherName => "another-name",
+                NameEnum::Unknown(ref s) => s.as_ref()
+            }
+        }
+    }
+
+    impl <'r> From<&'r str> for NameEnum {
+        fn from(s: &str) -> NameEnum {
+            match s {
+                "test-name" => NameEnum::TestName,
+                "another-name" => NameEnum::AnotherName,
+                _ => NameEnum::Unknown(s.to_string())
+            }
+        }
+    }
+
+    impl Deserialize for NameEnum {
+        fn deserialize<D: Deserializer>(d: &mut D) -> Result<NameEnum, D::Error> {
+            pub use serde::de::Visitor;
+
+            struct IntoVisitor;
+
+            impl Visitor for IntoVisitor {
+                type Value = NameEnum;
+
+                fn visit_str<E>(&mut self, v: &str) -> Result<NameEnum, E>
+                {
+                    Ok(v.into())
+                }
+            }
+
+            d.deserialize_str(IntoVisitor)
+        }
+    }
+
+    #[derive(Debug, PartialEq, Deserialize, Serialize)]
+    pub struct NameListWrapper {
+        #[serde(deserialize_with = "de_name_list", serialize_with = "ser_name_list")]
+        e: Vec<NameEnum>,
+        #[serde(deserialize_with = "de_bytes", serialize_with = "ser_bytes")]
+        f: Vec<u8>
+    }
+
+    impl Serialize for NameEnum {
+        fn serialize<S: Serializer>(&self, s: &mut S) -> Result<(), S::Error> {
+            s.serialize_str(self.as_ref())
+        }
     }
 
     test_codec!(prim_false, false, &[0]);
@@ -148,5 +209,14 @@ mod test {
             0, 0, 0, 1, b'x',
             1
         ]
+    );
+
+    test_codec!(
+        name_list,
+        NameListWrapper {
+            e: vec![NameEnum::TestName, NameEnum::Unknown("unknown".to_string()), NameEnum::AnotherName],
+            f: b"test-name".to_vec()
+        },
+        b"\x00\x00\x00\x1Etest-name,unknown,another-name\x00\x00\x00\x09test-name"
     );
 }

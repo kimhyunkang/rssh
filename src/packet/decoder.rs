@@ -144,6 +144,30 @@ pub fn de_bytes<D: de::Deserializer>(d: &mut D) -> Result<Vec<u8>, D::Error> {
     d.deserialize_bytes(IntoVisitor)
 }
 
+pub trait Name: de::Deserialize + for<'a> From<&'a str> {
+}
+
+impl <T> Name for T where T: de::Deserialize + for<'a> From<&'a str> {
+}
+
+pub fn de_name_list<D: de::Deserializer, T: Name>(d: &mut D) -> Result<Vec<T>, D::Error> {
+    struct IntoVisitor<U> {
+        _x: PhantomData<U>
+    }
+
+    impl <U: Name> de::Visitor for IntoVisitor<U> {
+        type Value = Vec<U>;
+
+        fn visit_str<E>(&mut self, v: &str) -> Result<Vec<U>, E>
+        {
+            Ok(v.split(',').map(|s| s.into()).collect())
+        }
+    }
+
+    let visitor = IntoVisitor { _x: PhantomData };
+    d.deserialize_str(visitor)
+}
+
 macro_rules! impl_error {
     ($func:ident($($arg:ty),*), $errtype:expr) => {
         #[inline]
