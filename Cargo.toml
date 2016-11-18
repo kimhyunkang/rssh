@@ -11,3 +11,6 @@ serde = "0.8"
 serde_derive = "0.8"
 tokio-core = { git = "https://github.com/tokio-rs/tokio-core.git", rev = "0a3dc0bb" }
 untrusted = "0.3"
+
+[dev-dependencies]
+rustc-serialize = "0.3"

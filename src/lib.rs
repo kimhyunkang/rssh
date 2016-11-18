@@ -1,4 +1,5 @@
 #![feature(proc_macro)]
+#![feature(try_from)]
 
 extern crate futures;
 extern crate rand;
@@ -11,9 +12,13 @@ extern crate serde_derive;
 extern crate tokio_core;
 extern crate untrusted;
 
+#[cfg(test)]
+extern crate rustc_serialize;
+
 pub mod async;
-pub mod packet;
 pub mod handshake;
+pub mod key;
+pub mod packet;
 pub mod transport;
 
 pub const SSH_MSG_KEXINIT: u8 = 20;

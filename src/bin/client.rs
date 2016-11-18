@@ -36,8 +36,8 @@ fn main() {
             "RSSHS_0.1.0",
             "Hello"
         )
-    }).and_then(|(reader, writer, version)| {
-        println!("got hello message: {}", String::from_utf8_lossy(&version));
+    }).and_then(|(reader, writer, keybuilder)| {
+        println!("got hello message: {}", keybuilder.v_s.as_ref().unwrap());
 
         let supported_algorithms = AlgorithmNegotiation {
             kex_algorithms: vec![KexAlgorithm::ECDH_SHA2_NISTP256],
@@ -59,14 +59,15 @@ fn main() {
             reader,
             writer,
             &supported_algorithms,
-            &mut rng
+            &mut rng,
+            keybuilder
         )
-    }).and_then(|(reader, writer, neg)| {
+    }).and_then(|(reader, writer, neg, keybuilder)| {
         let mut rng = thread_rng();
         println!("got algorithm neg: {:?}", neg);
-        rssh::handshake::ecdh_sha2_nistp256_client(reader, writer, &mut rng)
-    }).map(|(_, _, buf, shared_secret)| {
-        println!("got key exchange: {:?}", buf);
+        rssh::handshake::ecdh_sha2_nistp256_client(reader, writer, &mut rng, keybuilder)
+    }).map(|(_, _, keybuilder)| {
+        println!("got key exchange: {:?}", keybuilder);
     }).map_err(|e| {
         panic!("error: {}", e);
     });

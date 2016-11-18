@@ -115,7 +115,7 @@ pub struct KexInit {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct KexReply {
     #[serde(deserialize_with = "de_inner", serialize_with = "ser_inner")]
-    pub server_cert: ServerCert,
+    pub server_key: ServerKey,
     #[serde(deserialize_with = "de_bytes", serialize_with = "ser_bytes")]
     pub f: Vec<u8>,
     #[serde(deserialize_with = "de_inner", serialize_with = "ser_inner")]
@@ -124,7 +124,7 @@ pub struct KexReply {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[allow(non_camel_case_types)]
-pub enum ServerCert {
+pub enum ServerKey {
     #[serde(rename="ssh-rsa")]
     SSH_RSA {
         #[serde(deserialize_with = "de_bytes", serialize_with = "ser_bytes")]

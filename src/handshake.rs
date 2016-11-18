@@ -1,5 +1,6 @@
 use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
+use key::KeyBuilder;
 use packet::types::{AlgorithmNegotiation, KexInit, KexReply};
 use packet::{deserialize, deserialize_msg, serialize, serialize_msg};
 use transport::{unencrypted_read_packet, unencrypted_write_packet};
@@ -59,12 +60,16 @@ pub fn build_kexinit_payload(neg: &AlgorithmNegotiation, rng: &mut Rng) -> Resul
     Ok(payload)
 }
 
+
 pub fn version_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, version_string: &str, comment: &str)
-        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, Vec<u8>), Error=HandshakeError>>
+        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, KeyBuilder), Error=HandshakeError>>
     where R: Read + Send + 'static, W: Write + Send + 'static
 {
+    let v_c = format!("SSH-2.0-{} {}", version_string, comment);
+
     let mut buf = Vec::with_capacity(256);
-    write!(buf, "SSH-2.0-{} {}\r\n", version_string, comment).unwrap();
+    buf.write(v_c.as_bytes()).unwrap();
+    buf.write(b"\r\n").unwrap();
     println!("V_C: SSH-2.0-{} {}", version_string, comment);
     if buf.len() > 255 {
         panic!("version string and comment too long");
@@ -76,22 +81,31 @@ pub fn version_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<
     
     let r = read_until(reader, b'\n', Vec::with_capacity(256)).map_err(|e| e.into()).and_then(|(reader, buf)| {
         if buf.starts_with(b"SSH-2.0-") && buf.ends_with(b"\r\n") {
-            println!("V_S: {:?}", &buf[.. buf.len() - 2]);
-            Ok((reader, buf[8 .. buf.len()-2].to_vec()))
+            match str::from_utf8(&buf[.. buf.len() - 2]) {
+                Ok(v_s) => {
+                    let keybuilder = KeyBuilder {
+                        v_c: Some(v_c),
+                        v_s: Some(v_s.into()),
+                        .. Default::default()
+                    };
+                    Ok((reader, keybuilder))
+                },
+                Err(_) => Err(HandshakeError::InvalidVersionExchange)
+            }
         } else {
             Err(HandshakeError::InvalidVersionExchange)
         }
     });
 
-    w.join(r).map(|(writer, (reader, version))| (reader, writer, version)).boxed()
+    w.join(r).map(|(writer, (reader, keybuilder))| (reader, writer, keybuilder)).boxed()
 }
 
-pub fn algorithm_negotiation<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, supported_algorithms: &AlgorithmNegotiation, rng: &mut RNG)
-        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, AlgorithmNegotiation), Error=HandshakeError>>
+pub fn algorithm_negotiation<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, supported_algorithms: &AlgorithmNegotiation, rng: &mut RNG, mut keybuilder: KeyBuilder)
+        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, AlgorithmNegotiation, KeyBuilder), Error=HandshakeError>>
     where R: Read + Send + 'static, W: Write + Send + 'static, RNG: Rng
 {
     let payload = build_kexinit_payload(supported_algorithms, rng).unwrap();
-    println!("I_C: {:?}", &payload[1..]);
+    keybuilder.i_c = Some(payload.clone());
 
     let w = unencrypted_write_packet(writer, payload, rng).and_then(|writer| {
         flush(writer)
@@ -99,9 +113,9 @@ pub fn algorithm_negotiation<R, W, RNG>(reader: AsyncBufReader<R>, writer: Async
 
     let r = unencrypted_read_packet(reader).map_err(|e| e.into()).and_then(|(reader, buf)| {
         if buf[0] == SSH_MSG_KEXINIT {
-            println!("I_S: {:?}", &buf[1..]);
+            keybuilder.i_s = Some(buf.clone());
             match deserialize::<AlgorithmNegotiation>(&buf[17..]) {
-                Ok(neg) => Ok((reader, neg)),
+                Ok(neg) => Ok((reader, neg, keybuilder)),
                 Err(e) => Err(HandshakeError::InvalidAlgorithmNegotiation(e.to_string()))
             }
         } else {
@@ -109,7 +123,7 @@ pub fn algorithm_negotiation<R, W, RNG>(reader: AsyncBufReader<R>, writer: Async
         }
     });
 
-    w.join(r).map(|(writer, (reader, packet))| (reader, writer, packet)).boxed()
+    w.join(r).map(|(writer, (reader, packet, kb))| (reader, writer, packet, kb)).boxed()
 }
 
 pub fn ecdh_sha2_nistp256_server<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>)
@@ -121,8 +135,8 @@ pub fn ecdh_sha2_nistp256_server<R, W>(reader: AsyncBufReader<R>, writer: AsyncB
     }).boxed()
 }
 
-pub fn ecdh_sha2_nistp256_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, rng: &mut RNG)
-        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, KexReply, Vec<u8>), Error=HandshakeError>>
+pub fn ecdh_sha2_nistp256_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, rng: &mut RNG, mut keybuilder: KeyBuilder)
+        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, KeyBuilder), Error=HandshakeError>>
     where R: Read + Send + 'static, W: Write + Send + 'static, RNG: Rng
 {
     let ring_rng = rand::SystemRandom::new();
@@ -130,7 +144,7 @@ pub fn ecdh_sha2_nistp256_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: A
     let mut key = [0u8; agreement::PUBLIC_KEY_MAX_LEN];
     client_priv_key.compute_public_key(&mut key[..client_priv_key.public_key_len()]).unwrap();
     let client_pub_key = &key[..client_priv_key.public_key_len()];
-    println!("client_pub_key: {:?}", client_pub_key);
+    keybuilder.e = Some(client_pub_key.to_vec());
 
     let kex_init = KexInit { e: client_pub_key.to_vec() };
     let kex_message = serialize_msg(SSH_MSG_KEXDH_INIT, &kex_init).unwrap();
@@ -142,16 +156,15 @@ pub fn ecdh_sha2_nistp256_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: A
     let r = unencrypted_read_packet(reader).map_err(|e| e.into()).and_then(|(reader, payload)| {
         match deserialize_msg::<KexReply>(&payload) {
             Ok((msg_key, reply)) => if msg_key == SSH_MSG_KEXDH_REPLY {
-                println!("K_S: {:?}", serialize(&reply.server_cert));
-                println!("server_pub_key: {:?}", reply.f);
-                let shared_secret = {
-                    let server_pub_key = untrusted::Input::from(&reply.f);
-                    agreement::agree_ephemeral(client_priv_key, &agreement::ECDH_P256, server_pub_key, ring::error::Unspecified, |shared_secret| {
-                        println!("shared_secret: {:?}", shared_secret);
-                        Ok(shared_secret.to_vec())
-                    }).unwrap()
-                };
-                Ok((reader, reply, shared_secret))
+                keybuilder.k_s = Some(serialize(&reply.server_key).unwrap());
+                keybuilder.server_key = Some(reply.server_key);
+                keybuilder.f = Some(reply.f.clone());
+                let server_pub_key = untrusted::Input::from(&reply.f);
+                agreement::agree_ephemeral(client_priv_key, &agreement::ECDH_P256, server_pub_key, ring::error::Unspecified, |shared_secret| {
+                    keybuilder.k = Some(shared_secret.to_vec());
+                    Ok(())
+                }).unwrap();
+                Ok((reader, keybuilder))
             } else {
                 Err(HandshakeError::InvalidKexReply("SSH_MSG_KEXDH_REPLY not received".to_string()))
             },
@@ -159,5 +172,5 @@ pub fn ecdh_sha2_nistp256_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: A
         }
     });
 
-    w.join(r).map(|(writer, (reader, packet, shared_secret))| (reader, writer, packet, shared_secret)).boxed()
+    w.join(r).map(|(writer, (reader, keybuilder))| (reader, writer, keybuilder)).boxed()
 }
