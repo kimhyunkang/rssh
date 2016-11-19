@@ -63,7 +63,7 @@ fn main() {
                 &mut rng,
                 keybuilder
             )
-        }).and_then(|(reader, writer, neg, keybuilder)| {
+        }).and_then(|(reader, writer, neg, _keybuilder)| {
             println!("got algorithm neg: {:?}", neg);
 
             rssh::handshake::ecdh_sha2_nistp256_server(reader, writer)

@@ -57,7 +57,8 @@ macro_rules! impl_name_enum {
 }
 
 impl_name_enum!(KexAlgorithm {
-    ECDH_SHA2_NISTP256 => "ecdh-sha2-nistp256"
+    ECDH_SHA2_NISTP256 => "ecdh-sha2-nistp256",
+    CURVE25519_SHA256 => "curve25519-sha256@libssh.org"
 });
 
 impl_name_enum!(ServerHostKeyAlgorithm {
@@ -65,7 +66,8 @@ impl_name_enum!(ServerHostKeyAlgorithm {
 });
 
 impl_name_enum!(EncryptionAlgorithm {
-    AES256_CBC => "aes256-cbc"
+    AES256_CBC => "aes256-cbc",
+    AES256_CTR => "aes256-ctr"
 });
 
 impl_name_enum!(MacAlgorithm {
@@ -122,7 +124,7 @@ pub struct KexReply {
     pub signature: Signature
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[allow(non_camel_case_types)]
 pub enum ServerKey {
     #[serde(rename="ssh-rsa")]

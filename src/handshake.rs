@@ -1,7 +1,7 @@
 use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
 use key::KeyBuilder;
-use packet::types::{AlgorithmNegotiation, KexInit, KexReply};
+use packet::types::{AlgorithmNegotiation, KexInit, KexReply, ServerKey, Signature};
 use packet::{deserialize, deserialize_msg, serialize, serialize_msg};
 use transport::{unencrypted_read_packet, unencrypted_write_packet};
 
@@ -9,8 +9,7 @@ use std::{fmt, io, str};
 use std::io::{Read, Write};
 use futures::Future;
 use rand::Rng;
-use ring;
-use ring::{agreement, rand};
+use ring::{agreement, digest, rand, signature};
 use tokio_core::io::{flush, read_until, write_all};
 use untrusted;
 
@@ -22,6 +21,8 @@ pub enum HandshakeError {
     InvalidVersionExchange,
     InvalidAlgorithmNegotiation(String),
     InvalidKexReply(String),
+    KexFailed,
+    ServerKeyNotVerified,
     UnknownCertType(String)
 }
 
@@ -42,6 +43,10 @@ impl fmt::Display for HandshakeError {
                 write!(f, "InvalidAlgorithmNegotiation({})", msg),
             HandshakeError::InvalidKexReply(ref msg) =>
                 write!(f, "InvalidKexReply({})", msg),
+            HandshakeError::KexFailed =>
+                write!(f, "KexFailed"),
+            HandshakeError::ServerKeyNotVerified =>
+                write!(f, "ServerKeyNotVerified"),
             HandshakeError::UnknownCertType(ref s) =>
                 write!(f, "UnknownCertType({})", s)
         }
@@ -135,12 +140,33 @@ pub fn ecdh_sha2_nistp256_server<R, W>(reader: AsyncBufReader<R>, writer: AsyncB
     }).boxed()
 }
 
-pub fn ecdh_sha2_nistp256_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, rng: &mut RNG, mut keybuilder: KeyBuilder)
+fn into_mpint(buf: &[u8]) -> Vec<u8> {
+    if buf.len() == 0 {
+        Vec::new()
+    } else if buf[0] <= 0x7f {
+        buf.into()
+    } else {
+        let mut v = Vec::with_capacity(buf.len() + 1);
+        v.push(0);
+        v.extend_from_slice(buf);
+        v
+    }
+}
+
+fn from_mpint(data: &[u8]) -> &[u8] {
+    if data.len() > 0 && data[0] == 0 {
+        &data[1..]
+    } else {
+        data
+    }
+}
+
+pub fn ecdh_curve25519_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, rng: &mut RNG, mut keybuilder: KeyBuilder)
         -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, KeyBuilder), Error=HandshakeError>>
     where R: Read + Send + 'static, W: Write + Send + 'static, RNG: Rng
 {
     let ring_rng = rand::SystemRandom::new();
-    let client_priv_key = agreement::EphemeralPrivateKey::generate(&agreement::ECDH_P256, &ring_rng).unwrap();
+    let client_priv_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &ring_rng).unwrap();
     let mut key = [0u8; agreement::PUBLIC_KEY_MAX_LEN];
     client_priv_key.compute_public_key(&mut key[..client_priv_key.public_key_len()]).unwrap();
     let client_pub_key = &key[..client_priv_key.public_key_len()];
@@ -156,15 +182,30 @@ pub fn ecdh_sha2_nistp256_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: A
     let r = unencrypted_read_packet(reader).map_err(|e| e.into()).and_then(|(reader, payload)| {
         match deserialize_msg::<KexReply>(&payload) {
             Ok((msg_key, reply)) => if msg_key == SSH_MSG_KEXDH_REPLY {
+                let pub_key = {
+                    let &ServerKey::SSH_RSA { ref e, ref n } = &reply.server_key;
+                    (
+                        untrusted::Input::from(from_mpint(n)),
+                        untrusted::Input::from(from_mpint(e))
+                    )
+                };
                 keybuilder.k_s = Some(serialize(&reply.server_key).unwrap());
-                keybuilder.server_key = Some(reply.server_key);
+                keybuilder.server_key = Some(reply.server_key.clone());
                 keybuilder.f = Some(reply.f.clone());
                 let server_pub_key = untrusted::Input::from(&reply.f);
-                agreement::agree_ephemeral(client_priv_key, &agreement::ECDH_P256, server_pub_key, ring::error::Unspecified, |shared_secret| {
-                    keybuilder.k = Some(shared_secret.to_vec());
+                agreement::agree_ephemeral(client_priv_key, &agreement::X25519, server_pub_key, HandshakeError::KexFailed, |shared_secret| {
+                    keybuilder.k = Some(into_mpint(shared_secret));
                     Ok(())
                 }).unwrap();
-                Ok((reader, keybuilder))
+                let hash = keybuilder.digest(&digest::SHA256).unwrap();
+                let h = untrusted::Input::from(&hash.as_ref());
+                let Signature::SSH_RSA { signature: ref sgn } = reply.signature;
+                let sgn = untrusted::Input::from(sgn);
+                match signature::primitive::verify_rsa(&signature::RSA_PKCS1_2048_8192_SHA1,
+                                               pub_key, h, sgn) {
+                    Ok(()) => Ok((reader, keybuilder)),
+                    Err(_) => Err(HandshakeError::ServerKeyNotVerified)
+                }
             } else {
                 Err(HandshakeError::InvalidKexReply("SSH_MSG_KEXDH_REPLY not received".to_string()))
             },
