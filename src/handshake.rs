@@ -3,7 +3,7 @@ use async::bufwriter::AsyncBufWriter;
 use key::KeyBuilder;
 use packet::types::{AlgorithmNegotiation, KexInit, KexReply, ServerKey, Signature};
 use packet::{deserialize, deserialize_msg, serialize, serialize_msg};
-use transport::{unencrypted_read_packet, unencrypted_write_packet};
+use transport::{unencrypted_read_packet, unencrypted_write_packet, ntoh};
 
 use std::{fmt, io, str};
 use std::io::{Read, Write};
@@ -31,9 +31,13 @@ pub struct SshContext {
     session_id: Vec<u8>
 }
 
-pub trait AsyncPacketExchange {
-    type Error;
+pub struct PacketWriteRequest {
+    msg_id: u8,
+    payload: Vec<u8>,
+    flush: bool
+}
 
+pub trait AsyncPacketState: Future {
     fn wants_read(&self) -> bool {
         false
     }
@@ -42,12 +46,104 @@ pub trait AsyncPacketExchange {
         Ok(())
     }
 
-    fn wants_write(&self) -> Option<(u8, Vec<u8>)> {
+    fn wants_write(&self) -> Option<PacketWriteRequest> {
         None
     }
 
-    fn on_write(&mut self) -> Result<(), Self::Error> {
+    fn on_flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
+    }
+}
+
+enum PacketReadState {
+    Idle,
+    ReadPayload(u32, u8),
+}
+
+enum PacketWriteState {
+    WriteHeader,
+    WritePayload,
+    WritePadding,
+    Flush
+}
+
+pub struct AsyncPacketTransport<'r, 'w, R: Read+'r, W: Write+'w, RNG, T> {
+    rd: &'r mut AsyncBufReader<R>,
+    rd_st: PacketReadState,
+    wr: &'w mut AsyncBufWriter<W>,
+    wr_req: Option<PacketWriteRequest>,
+    wr_st: PacketWriteState,
+    rng: RNG,
+    st: T,
+}
+
+pub trait TransportError : From<io::Error> {
+    fn invalid_header() -> Self;
+}
+
+impl <'r, 'w, R, W, RNG, T> Future for AsyncPacketTransport<'r, 'w, R, W, RNG, T>
+    where R: Read + 'r, W: Write + 'w, RNG: Rng, T: AsyncPacketState, T::Error: TransportError
+{
+    type Item = T::Item;
+    type Error = T::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        match self.rd_st {
+            PacketReadState::Idle => {
+                if self.st.wants_read() {
+                    if let Async::Ready(buf) = try!(self.rd.nb_read_exact(5)) {
+                        let pkt_len = ntoh(&buf[.. 4]);
+                        let pad_len = buf[4];
+                        if pkt_len < 16 || pkt_len < (pad_len as u32) + 1 {
+                            return Err(Self::Error::invalid_header());
+                        }
+                        self.rd_st = PacketReadState::ReadPayload(pkt_len, pad_len);
+                    }
+                }
+            },
+            PacketReadState::ReadPayload(pkt_len, pad_len) => {
+                if let Async::Ready(buf) = try!(self.rd.nb_read_exact(pkt_len as usize - 1)) {
+                    self.rd_st = PacketReadState::Idle;
+                    try!(self.st.on_read(buf[0], &buf[1..]));
+                }
+            }
+        }
+
+        match self.wr_req {
+            None => {
+                if let Some(req) = match self.st.wants_write() {
+                    self.wr_req = req;
+                }
+            },
+            Some(ref req) => {
+                match self.wr_st {
+                    PacketWriteState::WriteHeader {
+                        let pkt_len = self.payload.len() + self.padding.len() + 1;
+                        let mut header = [0u8; 5];
+                        header[0] = (pkt_len >> 24) as u8;
+                        header[1] = (pkt_len >> 16) as u8;
+                        header[2] = (pkt_len >> 8) as u8;
+                        header[3] = pkt_len as u8;
+                        header[4] = self.padding.len() as u8;
+                        if let Async::Ready(()) = try!(self.wr.nb_write_exact(&header)) {
+                            self.wr_st = PacketWriteState::WritePayload;
+                        }
+                    },
+                    PacketWriteState::WritePayload {
+                        if let Async::Ready(()) = try!(self.wr.nb_write_exact(&req.payload)) {
+                            self.wr_st = PacketWriteState::WritePadding;
+                        }
+                    },
+                    PacketWriteState::WritePadding {
+                        if let Async::Ready(()) = try!(self.wr.nb_write_exact(&req.padding)) {
+                            self.wr_st = PacketWriteState::WritePadding;
+                        }
+                    },
+                }
+            }
+        } 
+
+        Ok(Async::NotReady)
     }
 }
 
@@ -55,28 +151,6 @@ pub struct ClientHandshake<'r, 'w, R: Read + 'r, W: Write + 'w> {
     rd: &'r mut AsyncBufReader<R>,
     wr: &'w mut AsyncBufWriter<W>,
     st: ClientKeyExchange
-}
-
-impl <'r, 'w, R, W> Future for ClientHandshake<'r, 'w, R, W>
-        where R: Read + 'r, W: Write + 'w
-{
-    type Item = SshContext;
-    type Error = HandshakeError;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        if let Some(len) = self.st.wants_read() {
-            match self.rd.nb_read_exact(len)? {
-                Async::NotReady => (),
-                Async::Ready(data) => self.st.on_read(data)?
-            }
-        }
-
-        if let Some(data) = self.st.wants_write() {
-            self.wr.nb_write_exact(data)?;
-        }
-
-        self.st.poll()
-    }
 }
 
 impl Future for ClientKeyExchange {
@@ -92,23 +166,6 @@ struct ClientKeyExchange {
     v_c: String,
     v_s: String,
     st: ClientKexState
-}
-
-impl AsyncState for ClientKeyExchange {
-    type Error = HandshakeError;
-}
-
-enum PacketWriteState {
-    WritingHeader,
-    WritingPayload,
-    Flushing,
-    Done
-}
-
-enum PacketReadState {
-    ReadingHeader,
-    ReadingPayload(u32, u8),
-    Done
 }
 
 enum ClientKexState {
