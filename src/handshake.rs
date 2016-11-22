@@ -7,9 +7,10 @@ use transport::{unencrypted_read_packet, unencrypted_write_packet};
 
 use std::{fmt, io, str};
 use std::io::{Read, Write};
-use futures::Future;
+use futures::{Async, Future, Poll};
 use rand::Rng;
 use ring::{agreement, digest, rand, signature};
+use ring::digest::Context;
 use tokio_core::io::{flush, read_until, write_all};
 use untrusted;
 
@@ -24,6 +25,109 @@ pub enum HandshakeError {
     KexFailed,
     ServerKeyNotVerified,
     UnknownCertType(String)
+}
+
+pub struct SshContext {
+    session_id: Vec<u8>
+}
+
+pub trait AsyncPacketExchange {
+    type Error;
+
+    fn wants_read(&self) -> bool {
+        false
+    }
+
+    fn on_read(&mut self, msg_id: u8, msg: &[u8]) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn wants_write(&self) -> Option<(u8, Vec<u8>)> {
+        None
+    }
+
+    fn on_write(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+pub struct ClientHandshake<'r, 'w, R: Read + 'r, W: Write + 'w> {
+    rd: &'r mut AsyncBufReader<R>,
+    wr: &'w mut AsyncBufWriter<W>,
+    st: ClientKeyExchange
+}
+
+impl <'r, 'w, R, W> Future for ClientHandshake<'r, 'w, R, W>
+        where R: Read + 'r, W: Write + 'w
+{
+    type Item = SshContext;
+    type Error = HandshakeError;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        if let Some(len) = self.st.wants_read() {
+            match self.rd.nb_read_exact(len)? {
+                Async::NotReady => (),
+                Async::Ready(data) => self.st.on_read(data)?
+            }
+        }
+
+        if let Some(data) = self.st.wants_write() {
+            self.wr.nb_write_exact(data)?;
+        }
+
+        self.st.poll()
+    }
+}
+
+impl Future for ClientKeyExchange {
+    type Item = SshContext;
+    type Error = HandshakeError;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        Ok(Async::NotReady)
+    }
+}
+
+struct ClientKeyExchange {
+    v_c: String,
+    v_s: String,
+    st: ClientKexState
+}
+
+impl AsyncState for ClientKeyExchange {
+    type Error = HandshakeError;
+}
+
+enum PacketWriteState {
+    WritingHeader,
+    WritingPayload,
+    Flushing,
+    Done
+}
+
+enum PacketReadState {
+    ReadingHeader,
+    ReadingPayload(u32, u8),
+    Done
+}
+
+enum ClientKexState {
+    AlgorithmExchange(AlgorithmExchangeState),
+    KeyExchange(KeyExchangeState),
+    Done(SshContext)
+}
+
+struct AlgorithmExchangeState {
+    i_c: Vec<u8>,
+    w_st: PacketWriteState,
+    r_st: PacketReadState
+}
+
+struct KeyExchangeState {
+    e: Vec<u8>,
+    hash_ctx: Context,
+    w_st: PacketWriteState,
+    r_st: PacketReadState
 }
 
 impl From<io::Error> for HandshakeError {
@@ -64,7 +168,6 @@ pub fn build_kexinit_payload(neg: &AlgorithmNegotiation, rng: &mut Rng) -> Resul
 
     Ok(payload)
 }
-
 
 pub fn version_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, version_string: &str, comment: &str)
         -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, KeyBuilder), Error=HandshakeError>>
