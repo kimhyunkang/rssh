@@ -155,6 +155,98 @@ pub fn unencrypted_write_packet<W: Write, R: Rng>(sink: AsyncBufWriter<W>, paylo
     }
 }
 
+pub struct PacketWriteRequest {
+    msg_id: u8,
+    payload: Vec<u8>,
+    flush: bool
+}
+
+pub trait AsyncPacketState: Future {
+    fn wants_read(&self) -> bool {
+        false
+    }
+
+    fn on_read(&mut self, msg_id: u8, msg: &[u8]) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn wants_write(&self) -> Option<PacketWriteRequest> {
+        None
+    }
+
+    fn on_flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+enum PacketReadState {
+    Idle,
+    ReadPayload(u32, u8),
+}
+
+enum PacketWriteState {
+    Idle,
+    WritePayload(PacketWriteRequest, u8),
+    Flush
+}
+
+pub struct AsyncPacketTransport<'r, 'w, R: Read+'r, W: Write+'w, RNG, T> {
+    rd: &'r mut AsyncBufReader<R>,
+    rd_st: PacketReadState,
+    wr: &'w mut AsyncBufWriter<W>,
+    wr_st: PacketWriteState,
+    rng: RNG,
+    st: T,
+}
+
+pub trait TransportError : From<io::Error> {
+    fn invalid_header() -> Self;
+}
+
+fn compute_pad_len(payload_len: usize, block_size: usize) -> Option<(u8, u8)> {
+    let min_pad = 16 - ((payload.len() + 5) % block_size);
+    let max_pad = 255 - ((payload.len() + 5) % block_size);
+}
+
+impl <'r, 'w, R, W, RNG, T> Future for AsyncPacketTransport<'r, 'w, R, W, RNG, T>
+    where R: Read + 'r, W: Write + 'w, RNG: Rng, T: AsyncPacketState, T::Error: TransportError
+{
+    type Item = T::Item;
+    type Error = T::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        match self.wr_st {
+            PacketWriteState::Idle => {
+                if let Some(req) = self.st.wants_write() {
+                }
+            }
+        }
+
+        match self.rd_st {
+            PacketReadState::Idle => {
+                if self.st.wants_read() {
+                    if let Async::Ready(buf) = try!(self.rd.nb_read_exact(5)) {
+                        let pkt_len = ntoh(&buf[.. 4]);
+                        let pad_len = buf[4];
+                        if pkt_len < 16 || pkt_len < (pad_len as u32) + 1 {
+                            return Err(Self::Error::invalid_header());
+                        }
+                        self.rd_st = PacketReadState::ReadPayload(pkt_len, pad_len);
+                    }
+                }
+            },
+            PacketReadState::ReadPayload(pkt_len, pad_len) => {
+                if let Async::Ready(buf) = try!(self.rd.nb_read_exact(pkt_len as usize - 1)) {
+                    self.rd_st = PacketReadState::Idle;
+                    try!(self.st.on_read(buf[0], &buf[1..]));
+                }
+            }
+        }
+
+        Ok(Async::NotReady)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
