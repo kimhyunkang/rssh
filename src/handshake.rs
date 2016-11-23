@@ -1,11 +1,12 @@
 use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
 use key::KeyBuilder;
-use packet::types::{AlgorithmNegotiation, KexInit, KexReply, ServerKey, Signature};
+use packet::types::*;
 use packet::{deserialize, deserialize_msg, serialize, serialize_msg};
-use transport::{unencrypted_read_packet, unencrypted_write_packet, ntoh};
+use transport::{AsyncPacketState, PacketWriteRequest, hton, unencrypted_read_packet, unencrypted_write_packet};
 
 use std::{fmt, io, str};
+use std::convert::TryFrom;
 use std::io::{Read, Write};
 use futures::{Async, Future, Poll};
 use rand::Rng;
@@ -27,48 +28,324 @@ pub enum HandshakeError {
     UnknownCertType(String)
 }
 
-pub struct SshContext {
+pub struct NegotiatedAlgorithm {
+    pub kex_algorithms: KexAlgorithm,
+    pub server_host_key_algorithms: ServerHostKeyAlgorithm,
+    pub encryption_algorithms_client_to_server: EncryptionAlgorithm,
+    pub encryption_algorithms_server_to_client: EncryptionAlgorithm,
+    pub mac_algorithms_client_to_server: MacAlgorithm,
+    pub mac_algorithms_server_to_client: MacAlgorithm,
+    pub compression_algorithms_client_to_server: CompressionAlgorithm,
+    pub compression_algorithms_server_to_client: CompressionAlgorithm,
+    pub languages_client_to_server: Option<Language>,
+    pub languages_server_to_client: Option<Language>
+}
+
+pub struct SSHContext {
+    neg_algorithm: NegotiatedAlgorithm,
     session_id: Vec<u8>
 }
 
-pub struct ClientHandshake<'r, 'w, R: Read + 'r, W: Write + 'w> {
-    rd: &'r mut AsyncBufReader<R>,
-    wr: &'w mut AsyncBufWriter<W>,
-    st: ClientKeyExchange
+enum ClientKeyExchange {
+    AlgorithmExchange(AlgorithmExchangeState),
+    KeyExchange(KeyExchangeState),
+    Agreed(Agreed)
 }
 
 impl Future for ClientKeyExchange {
-    type Item = SshContext;
+    type Item = SSHContext;
     type Error = HandshakeError;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self) -> Poll<SSHContext, HandshakeError> {
+        let next_st = match *self {
+            ClientKeyExchange::AlgorithmExchange(ref mut st) => {
+                if let Async::Ready(kex) = try!(st.poll()) {
+                    ClientKeyExchange::KeyExchange(kex)
+                } else {
+                    return Ok(Async::NotReady);
+                }
+            },
+            ClientKeyExchange::KeyExchange(ref mut st) => {
+                if let Async::Ready(agreed) = try!(st.poll()) {
+                    ClientKeyExchange::Agreed(agreed)
+                } else {
+                    return Ok(Async::NotReady);
+                }
+            },
+            ClientKeyExchange::Agreed(ref mut st) => {
+                return st.poll();
+            }
+        };
+
+        *self = next_st;
+
         Ok(Async::NotReady)
     }
 }
 
-struct ClientKeyExchange {
-    v_c: String,
-    v_s: String,
-    st: ClientKexState
-}
+impl AsyncPacketState for ClientKeyExchange {
+    fn wants_read(&self) -> bool {
+        match *self {
+            ClientKeyExchange::AlgorithmExchange(ref st) => st.wants_read(),
+            ClientKeyExchange::KeyExchange(ref st) => st.wants_read(),
+            ClientKeyExchange::Agreed(ref st) => false,
+        }
+    }
 
-enum ClientKexState {
-    AlgorithmExchange(AlgorithmExchangeState),
-    KeyExchange(KeyExchangeState),
-    Done(SshContext)
+    fn on_read(&mut self, msg: &[u8]) -> Result<(), Self::Error> {
+        match *self {
+            ClientKeyExchange::AlgorithmExchange(ref mut st) => st.on_read(msg),
+            ClientKeyExchange::KeyExchange(ref mut st) => st.on_read(msg),
+            ClientKeyExchange::Agreed(ref mut st) => unreachable!()
+        }
+    }
+
+    fn wants_write(&self) -> Option<PacketWriteRequest> {
+        match *self {
+            ClientKeyExchange::AlgorithmExchange(ref st) => st.wants_write(),
+            ClientKeyExchange::KeyExchange(ref st) => st.wants_write(),
+            ClientKeyExchange::Agreed(ref st) => st.wants_write(),
+        }
+    }
+
+    fn on_flush(&mut self) -> Result<(), Self::Error> {
+        match *self {
+            ClientKeyExchange::AlgorithmExchange(ref mut st) => st.on_flush(),
+            ClientKeyExchange::KeyExchange(ref mut st) => st.on_flush(),
+            ClientKeyExchange::Agreed(ref mut st) => st.on_flush(),
+        }
+    }
 }
 
 struct AlgorithmExchangeState {
+    v_c: String,
+    v_s: String,
     i_c: Vec<u8>,
-    w_st: PacketWriteState,
-    r_st: PacketReadState
+    written: bool,
+    res: Option<Vec<u8>>
+}
+
+fn digest_bytes(ctx: &mut Context, bytes: &[u8]) -> Result<(), HandshakeError> {
+    let len: u32 = match TryFrom::try_from(bytes.len()) {
+        Ok(l) => l,
+        Err(_) => return Err(HandshakeError::KexFailed)
+    };
+
+    ctx.update(&hton(len));
+    ctx.update(bytes);
+    Ok(())
+}
+
+impl Future for AlgorithmExchangeState {
+    type Item = KeyExchangeState;
+    type Error = HandshakeError;
+
+    fn poll(&mut self) -> Poll<KeyExchangeState, HandshakeError> {
+        match self.res.take() {
+            Some((neg, ctx)) => {
+                let ring_rng = rand::SystemRandom::new();
+                let keygen = agreement::EphemeralPrivateKey::generate(
+                    &agreement::X25519,
+                    &ring_rng);
+                if let Ok(priv_key) = keygen {
+                    let mut key = [0u8; agreement::PUBLIC_KEY_MAX_LEN];
+                    priv_key.compute_public_key(&mut key[..priv_key.public_key_len()]).unwrap();
+                    let pub_key = &key[..priv_key.public_key_len()];
+                    Ok(Async::Ready(KeyExchangeState {
+                        neg: neg,
+                        hash_ctx: ctx,
+                        priv_key: priv_key,
+                        e: pub_key.to_vec(),
+                        written: false,
+                        res: None
+                    }))
+                } else {
+                    Err(HandshakeError::KexFailed)
+                }
+            }
+            None => Ok(Async::NotReady)
+        }
+    }
+}
+
+impl AsyncPacketState for AlgorithmExchangeState {
+    fn wants_read(&self) -> bool {
+        self.res.is_none()
+    }
+
+    fn on_read(&mut self, msg: &[u8]) -> Result<(), HandshakeError> {
+        if msg.len() == 0 || msg[0] != SSH_MSG_KEXINIT {
+            return Err(HandshakeError::InvalidAlgorithmNegotiation(
+                    "SSH_MSG_KEXINIT not received".to_string()
+            ));
+        }
+
+        match deserialize::<AlgorithmNegotiation>(&msg[17..]) {
+            Err(e) => Err(HandshakeError::InvalidAlgorithmNegotiation(e.to_string())),
+            Ok(neg) => {
+                // XXX: Actually implement algorithm implementation
+                let algorithms = NegotiatedAlgorithm {
+                    kex_algorithms: KexAlgorithm::CURVE25519_SHA256,
+                    server_host_key_algorithms: ServerHostKeyAlgorithm::SSH_RSA,
+                    encryption_algorithms_client_to_server: EncryptionAlgorithm::AES256_GCM,
+                    encryption_algorithms_server_to_client: EncryptionAlgorithm::AES256_GCM,
+                    mac_algorithms_client_to_server: MacAlgorithm::HMAC_SHA2_256,
+                    mac_algorithms_server_to_client: MacAlgorithm::HMAC_SHA2_256,
+                    compression_algorithms_client_to_server: CompressionAlgorithm::NONE,
+                    compression_algorithms_server_to_client: CompressionAlgorithm::NONE,
+                    languages_client_to_server: None,
+                    languages_server_to_client: None
+                };
+
+                // XXX: Hash algorithm must be determined from NegotiatedAlgorithm
+                let mut ctx = Context::new(&digest::SHA256);
+                digest_bytes(&mut ctx, self.v_c.as_bytes());
+                digest_bytes(&mut ctx, self.v_s.as_bytes());
+                digest_bytes(&mut ctx, &self.i_c);
+                digest_bytes(&mut ctx, msg);
+
+                self.res = Some((neg, ctx));
+
+                Ok(())
+            }
+        }
+    }
+
+    fn wants_write(&self) -> Option<PacketWriteRequest> {
+        if self.written {
+            None
+        } else {
+            Some(PacketWriteRequest {
+                payload: self.i_c.clone(),
+                flush: true
+            })
+        }
+    }
+
+    fn on_flush(&mut self) -> Result<(), HandshakeError> {
+        self.written = true;
+        Ok(())
+    }
 }
 
 struct KeyExchangeState {
-    e: Vec<u8>,
+    neg: NegotiatedAlgorithm,
     hash_ctx: Context,
-    w_st: PacketWriteState,
-    r_st: PacketReadState
+    priv_key: agreement::EphemeralPrivateKey,
+    written: bool,
+    res: Option<Vec<u8>>
+}
+
+impl Future for KeyExchangeState {
+    type Item = Agreed;
+    type Error = HandshakeError;
+
+    fn poll(&mut self) -> Poll<Agreed, HandshakeError> {
+        if !self.written {
+            return Ok(Async::NotReady);
+        }
+
+        match self.res.take() {
+            Some(session_id) => {
+                let ssh_ctx = SSHContext { 
+                    neg_algorithm: self.neg.clone(),
+                    session_id: session_id
+                };
+                Ok(Async::Ready(Agreed {
+                    ctx: Some(ssh_ctx),
+                    new_key_sent: false
+                }))
+            },
+            None => Ok(Async::NotReady)
+        }
+    }
+}
+
+impl AsyncPacketState for KeyExchangeState {
+    fn wants_read(&self) -> bool {
+        self.res.is_none()
+    }
+
+    fn on_read(&mut self, msg: &[u8]) -> Result<(), HandshakeError> {
+        if msg.len() == 0 || msg[0] != SSH_MSG_KEXDH_REPLY {
+            return Err(HandshakeError::InvalidAlgorithmNegotiation(
+                    "SSH_MSG_KEXDH_REPLY not received".to_string()
+            ));
+        }
+
+        match deserialize::<KexReply>(&msg[1..]) {
+            Err(e) => Err(HandshakeError::InvalidAlgorithmNegotiation(e.to_string())),
+            Ok(reply) => {
+                let pub_key = {
+                    let &ServerKey::SSH_RSA { ref e, ref n } = &reply.server_key;
+                    (
+                        untrusted::Input::from(from_mpint(n)),
+                        untrusted::Input::from(from_mpint(e))
+                    )
+                };
+                let k_s = serialize(&reply.server_key).unwrap();
+                self.ctx.update(&k_s);
+                self.ctx.update(&self.e);
+                self.ctx.update(&reply.f);
+                let server_pub_key = untrusted::Input::from(&reply.f);
+                let k = try!(agreement::agree_ephemeral(self.priv_key, &agreement::X25519, server_pub_key, HandshakeError::KexFailed, |shared_secret| {
+                    Ok(into_mpint(shared_secret))
+                }));
+                self.ctx.update(&k);
+                let hash = self.ctx.finish();
+                let h = untrusted::Input::from(&hash.as_ref());
+                let Signature::SSH_RSA { signature: ref sgn } = reply.signature;
+                let sgn = untrusted::Input::from(sgn);
+                match signature::primitive::verify_rsa(&signature::RSA_PKCS1_2048_8192_SHA1,
+                                               pub_key, h, sgn) {
+                    Err(_) => {
+                        return Err(HandshakeError::ServerKeyNotVerified);
+                    },
+                    Ok(()) => {
+                        self.res = hash.as_ref().to_vec();
+                    }
+                }
+            }
+        }
+    }
+
+    fn wants_write(&self) -> Option<PacketWriteRequest> {
+        if self.written {
+            None
+        } else {
+            Some(PacketWriteRequest {
+                msg_id: SSH_MSG_KEXINIT,
+                payload: self.i_c.clone(),
+                flush: true
+            })
+        }
+    }
+
+    fn on_flush(&mut self) -> Result<(), HandshakeError> {
+        self.written = true;
+        Ok(())
+    }
+}
+
+struct Agreed {
+    ctx: Option<SSHContext>,
+    new_key_sent: bool
+}
+
+impl Future for Agreed {
+    type Item = SSHContext;
+    type Error = HandshakeError;
+
+    fn poll(&mut self) -> Poll<SSHContext, HandshakeError> {
+        if self.new_key_sent {
+            match self.res.take() {
+                Some(ctx) => Ok(Async::Ready(ctx)),
+                None => panic!("Called Agreed::poll() twice")
+            }
+        } else {
+            Ok(Async::NotReady)
+        }
+    }
 }
 
 impl From<io::Error> for HandshakeError {

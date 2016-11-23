@@ -1,11 +1,11 @@
 use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
 
-use std::io;
+use std::{cmp, io};
 use std::io::{Read, Write};
 
 use futures::{Async, Future, Poll};
-use rand::Rng;
+use rand::{Rng, thread_rng};
 
 pub struct UnencryptedStream<R: Read> {
     inner: Option<AsyncBufReader<R>>,
@@ -156,9 +156,8 @@ pub fn unencrypted_write_packet<W: Write, R: Rng>(sink: AsyncBufWriter<W>, paylo
 }
 
 pub struct PacketWriteRequest {
-    msg_id: u8,
-    payload: Vec<u8>,
-    flush: bool
+    pub payload: Vec<u8>,
+    pub flush: bool
 }
 
 pub trait AsyncPacketState: Future {
@@ -166,7 +165,7 @@ pub trait AsyncPacketState: Future {
         false
     }
 
-    fn on_read(&mut self, msg_id: u8, msg: &[u8]) -> Result<(), Self::Error> {
+    fn on_read(&mut self, msg: &[u8]) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -186,7 +185,7 @@ enum PacketReadState {
 
 enum PacketWriteState {
     Idle,
-    WritePayload(PacketWriteRequest, u8),
+    WritePayload(PacketWriteRequest, u32, u8),
     Flush
 }
 
@@ -199,13 +198,137 @@ pub struct AsyncPacketTransport<'r, 'w, R: Read+'r, W: Write+'w, RNG, T> {
     st: T,
 }
 
-pub trait TransportError : From<io::Error> {
+pub trait TransportError : From<io::Error> + From<()> {
     fn invalid_header() -> Self;
+    fn panic(&'static str) -> Self;
 }
 
-fn compute_pad_len(payload_len: usize, block_size: usize) -> Option<(u8, u8)> {
-    let min_pad = 16 - ((payload.len() + 5) % block_size);
-    let max_pad = 255 - ((payload.len() + 5) % block_size);
+macro_rules! try_add {
+    ($a:expr, $b:expr) => {
+        if let Some(x) = $a.checked_add($b) {
+            x
+        } else {
+            return Err(().into());
+        }
+    }
+}
+
+macro_rules! try_sub {
+    ($a:expr, $b:expr) => {
+        if let Some(x) = $a.checked_sub($b) {
+            x
+        } else {
+            return Err(().into());
+        }
+    }
+}
+
+pub fn compute_pad_len<R: Rng>(payload_len: usize, blk_size: usize, rng: &mut R) -> Result<(u32, u8), ()> {
+    let min_unit = cmp::max(blk_size, 8);
+
+    // maximum possible pkt_len = 5 byte header + payload_len + 255
+    let pkt_upperbound = cmp::min(try_add!(payload_len, 5 + 255), ::std::u32::MAX as usize);
+
+    // pkt_len = 5 byte header + payload_len + pad_len
+    // pad_len must be 4 bytes or larger
+    // pkt_len must be 16 bytes or larger, and it must be multiple of max(blk_size, 8)
+    let pkt_lowerbound = cmp::max(try_add!(payload_len, 5 + 4), cmp::max(min_unit, 16));
+
+    let max_pkt_len = pkt_upperbound - (pkt_upperbound % min_unit);
+    let min_pkt_len = try_add!(pkt_lowerbound, min_unit - 1) / min_unit * min_unit;
+
+    let except_pad = try_add!(payload_len, 5);
+    let max_pad_len = try_sub!(max_pkt_len, except_pad);
+    let min_pad_len = try_sub!(min_pkt_len, except_pad);
+
+    if 4 <= min_pad_len && min_pad_len <= max_pad_len && max_pad_len <= 255 {
+        let pad_len = 
+            rng.gen_range(0, (max_pad_len - min_pad_len) / min_unit + 1) * min_unit + min_pad_len;
+        let pkt_len = try_add!(pad_len, except_pad);
+        Ok((pkt_len as u32, pad_len as u8))
+    } else {
+        Err(())
+    }
+}
+
+impl <'r, 'w, R, W, RNG, T> AsyncPacketTransport<'r, 'w, R, W, RNG, T>
+    where R: Read + 'r, W: Write + 'w, RNG: Rng, T: AsyncPacketState, T::Error: TransportError
+{
+    fn try_write(&mut self) -> Result<(), T::Error> {
+        let next_state = match self.wr_st {
+            PacketWriteState::Idle => {
+                if let Some(req) = self.st.wants_write() {
+                    let (pkt_len, pad_len) = try!(compute_pad_len(req.payload.len(), 0, &mut self.rng));
+                    PacketWriteState::WritePayload(req, pkt_len, pad_len)
+                } else {
+                    return Ok(());
+                }
+            },
+            PacketWriteState::WritePayload(ref req, pkt_len, pad_len) => {
+                if pkt_len as usize != req.payload.len() + 6 + pad_len as usize {
+                    return Err(T::Error::panic("pkt_len does not match"));
+                }
+
+                let async_res = try!(self.wr.nb_write(pkt_len as usize, |buf| {
+                    buf[0] = ((pkt_len >> 24) & 0xff) as u8;
+                    buf[1] = ((pkt_len >> 16) & 0xff) as u8;
+                    buf[2] = ((pkt_len >> 8) & 0xff) as u8;
+                    buf[3] = (pkt_len & 0xff) as u8;
+                    buf[4] = pad_len;
+                    buf[5 .. 5 + req.payload.len()].copy_from_slice(&req.payload);
+
+                    let mut rng = thread_rng();
+                    rng.fill_bytes(&mut buf[5 + req.payload.len() ..]);
+                }));
+
+                if let Async::NotReady = async_res {
+                    return Ok(());
+                } else if req.flush {
+                    PacketWriteState::Flush
+                } else {
+                    try!(self.st.on_flush());
+                    PacketWriteState::Idle
+                }
+            },
+            PacketWriteState::Flush => {
+                if let Async::Ready(()) = try!(self.wr.nb_flush()) {
+                    try!(self.st.on_flush());
+                    PacketWriteState::Idle
+                } else {
+                    return Ok(());
+                }
+            }
+        };
+
+        self.wr_st = next_state;
+        Ok(())
+    }
+
+    fn try_read(&mut self) -> Result<(), T::Error> {
+        match self.rd_st {
+            PacketReadState::Idle => {
+                if self.st.wants_read() {
+                    if let Async::Ready(buf) = try!(self.rd.nb_read_exact(5)) {
+                        let pkt_len = ntoh(&buf[.. 4]);
+                        let pad_len = buf[4];
+                        if pkt_len < 16 || pkt_len < (pad_len as u32) + 1 {
+                            return Err(T::Error::invalid_header());
+                        }
+                        self.rd_st = PacketReadState::ReadPayload(pkt_len, pad_len);
+                    }
+                }
+            },
+            PacketReadState::ReadPayload(pkt_len, pad_len) => {
+                if let Async::Ready(buf) = try!(self.rd.nb_read_exact(pkt_len as usize - 1)) {
+                    let payload_len = pkt_len as usize - pad_len as usize - 1;
+                    self.rd_st = PacketReadState::Idle;
+                    try!(self.st.on_read(buf));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl <'r, 'w, R, W, RNG, T> Future for AsyncPacketTransport<'r, 'w, R, W, RNG, T>
@@ -215,35 +338,10 @@ impl <'r, 'w, R, W, RNG, T> Future for AsyncPacketTransport<'r, 'w, R, W, RNG, T
     type Error = T::Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.wr_st {
-            PacketWriteState::Idle => {
-                if let Some(req) = self.st.wants_write() {
-                }
-            }
-        }
+        try!(self.try_write());
+        try!(self.try_read());
 
-        match self.rd_st {
-            PacketReadState::Idle => {
-                if self.st.wants_read() {
-                    if let Async::Ready(buf) = try!(self.rd.nb_read_exact(5)) {
-                        let pkt_len = ntoh(&buf[.. 4]);
-                        let pad_len = buf[4];
-                        if pkt_len < 16 || pkt_len < (pad_len as u32) + 1 {
-                            return Err(Self::Error::invalid_header());
-                        }
-                        self.rd_st = PacketReadState::ReadPayload(pkt_len, pad_len);
-                    }
-                }
-            },
-            PacketReadState::ReadPayload(pkt_len, pad_len) => {
-                if let Async::Ready(buf) = try!(self.rd.nb_read_exact(pkt_len as usize - 1)) {
-                    self.rd_st = PacketReadState::Idle;
-                    try!(self.st.on_read(buf[0], &buf[1..]));
-                }
-            }
-        }
-
-        Ok(Async::NotReady)
+        self.st.poll()
     }
 }
 
@@ -283,6 +381,19 @@ mod test {
             }
         } else {
             panic!("cannot unwrap bufwriter");
+        }
+    }
+
+    #[test]
+    fn test_compute_pad_len() {
+        let mut rng = thread_rng();
+        for payload_len in 1 .. 257 {
+            if let Ok((pkt_len, pad_len)) = compute_pad_len(payload_len, 0, &mut rng) {
+                assert_eq!(pkt_len % 8, 0);
+                assert_eq!(pkt_len as usize, pad_len as usize + payload_len + 5);
+            } else {
+                panic!("compute_pad_len failed at payload_len = {}", payload_len);
+            }
         }
     }
 }
