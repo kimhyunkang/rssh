@@ -15,7 +15,7 @@ use ring::digest::Context;
 use tokio_core::io::{flush, read_until, write_all};
 use untrusted;
 
-use ::{SSH_MSG_KEXINIT, SSH_MSG_KEXDH_INIT, SSH_MSG_KEXDH_REPLY};
+use ::{SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_KEXDH_INIT, SSH_MSG_KEXDH_REPLY};
 
 #[derive(Debug)]
 pub enum HandshakeError {
@@ -28,6 +28,7 @@ pub enum HandshakeError {
     UnknownCertType(String)
 }
 
+#[derive(Clone)]
 pub struct NegotiatedAlgorithm {
     pub kex_algorithms: KexAlgorithm,
     pub server_host_key_algorithms: ServerHostKeyAlgorithm,
@@ -41,7 +42,7 @@ pub struct NegotiatedAlgorithm {
     pub languages_server_to_client: Option<Language>
 }
 
-pub struct SSHContext {
+pub struct SecureContext {
     neg_algorithm: NegotiatedAlgorithm,
     session_id: Vec<u8>
 }
@@ -53,10 +54,10 @@ enum ClientKeyExchange {
 }
 
 impl Future for ClientKeyExchange {
-    type Item = SSHContext;
+    type Item = SecureContext;
     type Error = HandshakeError;
 
-    fn poll(&mut self) -> Poll<SSHContext, HandshakeError> {
+    fn poll(&mut self) -> Poll<SecureContext, HandshakeError> {
         let next_st = match *self {
             ClientKeyExchange::AlgorithmExchange(ref mut st) => {
                 if let Async::Ready(kex) = try!(st.poll()) {
@@ -122,7 +123,7 @@ struct AlgorithmExchangeState {
     v_s: String,
     i_c: Vec<u8>,
     written: bool,
-    res: Option<Vec<u8>>
+    res: Option<(NegotiatedAlgorithm, Context)>
 }
 
 fn digest_bytes(ctx: &mut Context, bytes: &[u8]) -> Result<(), HandshakeError> {
@@ -204,7 +205,7 @@ impl AsyncPacketState for AlgorithmExchangeState {
                 digest_bytes(&mut ctx, &self.i_c);
                 digest_bytes(&mut ctx, msg);
 
-                self.res = Some((neg, ctx));
+                self.res = Some((algorithms, ctx));
 
                 Ok(())
             }
@@ -232,6 +233,7 @@ struct KeyExchangeState {
     neg: NegotiatedAlgorithm,
     hash_ctx: Context,
     priv_key: agreement::EphemeralPrivateKey,
+    e: Vec<u8>,
     written: bool,
     res: Option<Vec<u8>>
 }
@@ -247,7 +249,7 @@ impl Future for KeyExchangeState {
 
         match self.res.take() {
             Some(session_id) => {
-                let ssh_ctx = SSHContext { 
+                let ssh_ctx = SecureContext {
                     neg_algorithm: self.neg.clone(),
                     session_id: session_id
                 };
@@ -284,25 +286,26 @@ impl AsyncPacketState for KeyExchangeState {
                     )
                 };
                 let k_s = serialize(&reply.server_key).unwrap();
-                self.ctx.update(&k_s);
-                self.ctx.update(&self.e);
-                self.ctx.update(&reply.f);
+                self.hash_ctx.update(&k_s);
+                self.hash_ctx.update(&self.e);
+                self.hash_ctx.update(&reply.f);
                 let server_pub_key = untrusted::Input::from(&reply.f);
                 let k = try!(agreement::agree_ephemeral(self.priv_key, &agreement::X25519, server_pub_key, HandshakeError::KexFailed, |shared_secret| {
                     Ok(into_mpint(shared_secret))
                 }));
-                self.ctx.update(&k);
-                let hash = self.ctx.finish();
+                self.hash_ctx.update(&k);
+                let hash = self.hash_ctx.finish();
                 let h = untrusted::Input::from(&hash.as_ref());
                 let Signature::SSH_RSA { signature: ref sgn } = reply.signature;
                 let sgn = untrusted::Input::from(sgn);
                 match signature::primitive::verify_rsa(&signature::RSA_PKCS1_2048_8192_SHA1,
                                                pub_key, h, sgn) {
                     Err(_) => {
-                        return Err(HandshakeError::ServerKeyNotVerified);
+                        Err(HandshakeError::ServerKeyNotVerified)
                     },
                     Ok(()) => {
-                        self.res = hash.as_ref().to_vec();
+                        self.res = Some(hash.as_ref().to_vec());
+                        Ok(())
                     }
                 }
             }
@@ -313,9 +316,10 @@ impl AsyncPacketState for KeyExchangeState {
         if self.written {
             None
         } else {
+            let payload = serialize_msg(SSH_MSG_KEXINIT, &KexInit { e: self.e.clone() }).unwrap();
+
             Some(PacketWriteRequest {
-                msg_id: SSH_MSG_KEXINIT,
-                payload: self.i_c.clone(),
+                payload: payload,
                 flush: true
             })
         }
@@ -328,23 +332,34 @@ impl AsyncPacketState for KeyExchangeState {
 }
 
 struct Agreed {
-    ctx: Option<SSHContext>,
+    ctx: Option<SecureContext>,
     new_key_sent: bool
 }
 
 impl Future for Agreed {
-    type Item = SSHContext;
+    type Item = SecureContext;
     type Error = HandshakeError;
 
-    fn poll(&mut self) -> Poll<SSHContext, HandshakeError> {
+    fn poll(&mut self) -> Poll<SecureContext, HandshakeError> {
         if self.new_key_sent {
-            match self.res.take() {
+            match self.ctx.take() {
                 Some(ctx) => Ok(Async::Ready(ctx)),
                 None => panic!("Called Agreed::poll() twice")
             }
         } else {
             Ok(Async::NotReady)
         }
+    }
+}
+
+impl AsyncPacketState for Agreed {
+    fn wants_write(&self) -> Option<PacketWriteRequest> {
+        Some(PacketWriteRequest { payload: vec![SSH_MSG_NEWKEYS], flush: true })
+    }
+
+    fn on_flush(&mut self) -> Result<(), Self::Error> {
+        self.new_key_sent = true;
+        Ok(())
     }
 }
 
