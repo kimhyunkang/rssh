@@ -113,10 +113,10 @@ pub enum ClientKex {
 }
 
 impl Future for ClientKeyExchange {
-    type Item = Option<SecureContext>;
+    type Item = SecureContext;
     type Error = HandshakeError;
 
-    fn poll(&mut self) -> Poll<Option<SecureContext>, HandshakeError> {
+    fn poll(&mut self) -> Poll<SecureContext, HandshakeError> {
         let next_st = match self.st {
             ClientKex::AlgorithmExchange(ref mut st) => {
                 if let Async::Ready(kex) = try!(st.poll()) {
@@ -133,13 +133,13 @@ impl Future for ClientKeyExchange {
                 }
             },
             ClientKex::Agreed(ref mut st) => match try!(st.poll()) {
-                Async::Ready(ctx) => return Ok(Async::Ready(Some(ctx))),
+                Async::Ready(ctx) => return Ok(Async::Ready(ctx)),
                 Async::NotReady => return Ok(Async::NotReady)
             }
         };
 
         self.st = next_st;
-        Ok(Async::Ready(None))
+        Ok(Async::NotReady)
     }
 }
 

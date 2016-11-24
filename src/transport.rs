@@ -49,10 +49,28 @@ enum PacketReadState {
     ReadPayload(u32, u8),
 }
 
+impl PacketReadState {
+    fn is_idle(&self) -> bool {
+        match *self {
+            PacketReadState::Idle => true,
+            _ => false
+        }
+    }
+}
+
 enum PacketWriteState {
     Idle,
     WritePayload(PacketWriteRequest, u32, u8),
     Flush
+}
+
+impl PacketWriteState {
+    fn is_idle(&self) -> bool {
+        match *self {
+            PacketWriteState::Idle => true,
+            _ => false
+        }
+    }
 }
 
 pub struct AsyncPacketTransport<R: Read, W: Write, RNG, T> {
@@ -137,105 +155,119 @@ pub fn compute_pad_len<R: Rng>(payload_len: usize, blk_size: usize, rng: &mut R)
 impl <R, W, RNG, T> AsyncPacketTransport<R, W, RNG, T>
     where R: Read, W: Write, RNG: Rng, T: AsyncPacketState, T::Error: TransportError
 {
-    fn try_write(&mut self) -> Result<(), T::Error> {
-        let next_state = match self.wr_st {
-            PacketWriteState::Idle => {
-                if let Some(req) = self.st.write_packet() {
-                    let (pkt_len, pad_len) = try!(compute_pad_len(req.payload.len(), 0, &mut self.rng));
-                    PacketWriteState::WritePayload(req, pkt_len, pad_len)
-                } else {
-                    return Ok(());
-                }
-            },
-            PacketWriteState::WritePayload(ref req, pkt_len, pad_len) => {
-                if pkt_len as usize != req.payload.len() + 1 + pad_len as usize {
-                    return Err(T::Error::panic("pkt_len does not match"));
-                }
+    fn try_write(&mut self) -> Result<bool, T::Error> {
+        let mut callback_called = false;
+        loop {
+            let next_state = match self.wr_st {
+                PacketWriteState::Idle => {
+                    if let Some(req) = self.st.write_packet() {
+                        let (pkt_len, pad_len) = try!(compute_pad_len(req.payload.len(), 0, &mut self.rng));
+                        PacketWriteState::WritePayload(req, pkt_len, pad_len)
+                    } else {
+                        return Ok(callback_called);
+                    }
+                },
+                PacketWriteState::WritePayload(ref req, pkt_len, pad_len) => {
+                    if pkt_len as usize != req.payload.len() + 1 + pad_len as usize {
+                        return Err(T::Error::panic("pkt_len does not match"));
+                    }
 
-                let async_res = try!(self.wr.nb_write(pkt_len as usize + 4, |buf| {
-                    buf[0] = ((pkt_len >> 24) & 0xff) as u8;
-                    buf[1] = ((pkt_len >> 16) & 0xff) as u8;
-                    buf[2] = ((pkt_len >> 8) & 0xff) as u8;
-                    buf[3] = (pkt_len & 0xff) as u8;
-                    buf[4] = pad_len;
-                    buf[5 .. 5 + req.payload.len()].copy_from_slice(&req.payload);
+                    let async_res = try!(self.wr.nb_write(pkt_len as usize + 4, |buf| {
+                        buf[0] = ((pkt_len >> 24) & 0xff) as u8;
+                        buf[1] = ((pkt_len >> 16) & 0xff) as u8;
+                        buf[2] = ((pkt_len >> 8) & 0xff) as u8;
+                        buf[3] = (pkt_len & 0xff) as u8;
+                        buf[4] = pad_len;
+                        buf[5 .. 5 + req.payload.len()].copy_from_slice(&req.payload);
 
-                    let mut rng = thread_rng();
-                    rng.fill_bytes(&mut buf[5 + req.payload.len() ..]);
-                }));
+                        let mut rng = thread_rng();
+                        rng.fill_bytes(&mut buf[5 + req.payload.len() ..]);
+                    }));
 
-                if let Async::NotReady = async_res {
-                    return Ok(());
-                } else if req.flush {
-                    PacketWriteState::Flush
-                } else {
-                    try!(self.st.on_flush());
-                    PacketWriteState::Idle
+                    if let Async::NotReady = async_res {
+                        return Ok(callback_called);
+                    } else if req.flush {
+                        PacketWriteState::Flush
+                    } else {
+                        callback_called = true;
+                        try!(self.st.on_flush());
+                        PacketWriteState::Idle
+                    }
+                },
+                PacketWriteState::Flush => {
+                    if let Async::Ready(()) = try!(self.wr.nb_flush()) {
+                        callback_called = true;
+                        try!(self.st.on_flush());
+                        PacketWriteState::Idle
+                    } else {
+                        return Ok(callback_called);
+                    }
                 }
-            },
-            PacketWriteState::Flush => {
-                if let Async::Ready(()) = try!(self.wr.nb_flush()) {
-                    try!(self.st.on_flush());
-                    PacketWriteState::Idle
-                } else {
-                    return Ok(());
-                }
-            }
-        };
+            };
 
-        self.wr_st = next_state;
-        self.try_write()
+            self.wr_st = next_state;
+        }
     }
 
-    fn try_read(&mut self) -> Result<(), T::Error> {
-        let next_state = match self.rd_st {
-            PacketReadState::Idle => {
-                if !self.st.wants_read() {
-                    return Ok(());
-                }
+    fn try_read(&mut self) -> Result<bool, T::Error> {
+        let mut callback_called = false;
 
-                if let Async::Ready(buf) = try!(self.rd.nb_read_exact(5)) {
-                    let pkt_len = ntoh(&buf[.. 4]);
-                    let pad_len = buf[4];
-                    if pkt_len < 12 || pkt_len < (pad_len as u32) + 1 {
-                        println!("pkt_len: {}, pad_len: {}", pkt_len, pad_len);
-                        return Err(T::Error::invalid_header());
+        loop {
+            let next_state = match self.rd_st {
+                PacketReadState::Idle => {
+                    if !self.st.wants_read() {
+                        return Ok(callback_called);
                     }
-                    PacketReadState::ReadPayload(pkt_len, pad_len)
-                } else {
-                    return Ok(());
-                }
-            },
-            PacketReadState::ReadPayload(pkt_len, pad_len) => {
-                if let Async::Ready(buf) = try!(self.rd.nb_read_exact(pkt_len as usize - 1)) {
-                    let payload_len = pkt_len as usize - pad_len as usize - 1;
-                    try!(self.st.on_read(&buf[..payload_len]));
-                    PacketReadState::Idle
-                } else {
-                    return Ok(());
-                }
-            }
-        };
 
-        self.rd_st = next_state;
-        self.try_read()
+                    if let Async::Ready(buf) = try!(self.rd.nb_read_exact(5)) {
+                        let pkt_len = ntoh(&buf[.. 4]);
+                        let pad_len = buf[4];
+                        if pkt_len < 12 || pkt_len < (pad_len as u32) + 1 {
+                            return Err(T::Error::invalid_header());
+                        }
+                        PacketReadState::ReadPayload(pkt_len, pad_len)
+                    } else {
+                        return Ok(callback_called);
+                    }
+                },
+                PacketReadState::ReadPayload(pkt_len, pad_len) => {
+                    if let Async::Ready(buf) = try!(self.rd.nb_read_exact(pkt_len as usize - 1)) {
+                        let payload_len = pkt_len as usize - pad_len as usize - 1;
+                        try!(self.st.on_read(&buf[..payload_len]));
+                        callback_called = true;
+                        PacketReadState::Idle
+                    } else {
+                        return Ok(callback_called);
+                    }
+                }
+            };
+
+            self.rd_st = next_state;
+        }
     }
 }
 
 impl <R, W, RNG, T, V, E> Future for AsyncPacketTransport<R, W, RNG, T>
-    where R: Read, W: Write, RNG: Rng, T: AsyncPacketState + Future<Item=Option<V>, Error=E>, E: TransportError
+    where R: Read, W: Write, RNG: Rng, T: AsyncPacketState + Future<Item=V, Error=E>, E: TransportError
 {
     type Item = V;
     type Error = E;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        try!(self.try_write());
-        try!(self.try_read());
+        loop {
+            let w = try!(self.try_write());
+            let r = try!(self.try_read());
 
-        match try!(self.st.poll()) {
-            Async::Ready(None) => self.poll(),
-            Async::Ready(Some(x)) => Ok(Async::Ready(x)),
-            Async::NotReady => Ok(Async::NotReady)
+            if self.wr_st.is_idle() && self.rd_st.is_idle() {
+                match try!(self.st.poll()) {
+                    Async::Ready(x) => return Ok(Async::Ready(x)),
+                    Async::NotReady => if !w && !r {
+                        return Ok(Async::NotReady);
+                    }
+                }
+            } else {
+                return Ok(Async::NotReady)
+            }
         }
     }
 }
