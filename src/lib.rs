@@ -17,7 +17,6 @@ extern crate rustc_serialize;
 
 pub mod async;
 pub mod handshake;
-pub mod key;
 pub mod packet;
 pub mod transport;
 

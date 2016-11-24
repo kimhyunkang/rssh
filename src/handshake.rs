@@ -1,9 +1,8 @@
 use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
-use key::KeyBuilder;
 use packet::types::*;
-use packet::{deserialize, deserialize_msg, serialize, serialize_msg};
-use transport::{AsyncPacketState, AsyncPacketTransport, PacketWriteRequest, TransportError, hton, unencrypted_read_packet, unencrypted_write_packet};
+use packet::{deserialize, serialize, serialize_msg};
+use transport::{AsyncPacketState, AsyncPacketTransport, PacketWriteRequest, TransportError, hton};
 
 use std::{fmt, io, str};
 use std::convert::TryFrom;
@@ -491,41 +490,6 @@ pub fn client_key_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWrit
     AsyncPacketTransport::new(reader, writer, rng, ClientKeyExchange { st: kex })
 }
 
-pub fn algorithm_negotiation<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, supported_algorithms: &AlgorithmNegotiation, rng: &mut RNG, mut keybuilder: KeyBuilder)
-        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, AlgorithmNegotiation, KeyBuilder), Error=HandshakeError>>
-    where R: Read + Send + 'static, W: Write + Send + 'static, RNG: Rng
-{
-    let payload = build_kexinit_payload(supported_algorithms, rng).unwrap();
-    keybuilder.i_c = Some(payload.clone());
-
-    let w = unencrypted_write_packet(writer, payload, rng).and_then(|writer| {
-        flush(writer)
-    }).map_err(|e| e.into());
-
-    let r = unencrypted_read_packet(reader).map_err(|e| e.into()).and_then(|(reader, buf)| {
-        if buf[0] == SSH_MSG_KEXINIT {
-            keybuilder.i_s = Some(buf.clone());
-            match deserialize::<AlgorithmNegotiation>(&buf[17..]) {
-                Ok(neg) => Ok((reader, neg, keybuilder)),
-                Err(e) => Err(HandshakeError::InvalidAlgorithmNegotiation(e.to_string()))
-            }
-        } else {
-            Err(HandshakeError::InvalidAlgorithmNegotiation("SSH_MSG_KEXINIT not received".to_string()))
-        }
-    });
-
-    w.join(r).map(|(writer, (reader, packet, kb))| (reader, writer, packet, kb)).boxed()
-}
-
-pub fn ecdh_sha2_nistp256_server<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>)
-        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, Vec<u8>), Error=HandshakeError>>
-    where R: Read + Send + 'static, W: Write + Send + 'static
-{
-    unencrypted_read_packet(reader).map_err(|e| e.into()).map(|(reader, buf)| {
-        (reader, writer, buf)
-    }).boxed()
-}
-
 fn into_mpint(buf: &[u8]) -> Vec<u8> {
     if buf.len() == 0 {
         Vec::new()
@@ -545,59 +509,4 @@ fn from_mpint(data: &[u8]) -> &[u8] {
     } else {
         data
     }
-}
-
-pub fn ecdh_curve25519_client<R, W, RNG>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, rng: &mut RNG, mut keybuilder: KeyBuilder)
-        -> Box<Future<Item=(AsyncBufReader<R>, AsyncBufWriter<W>, KeyBuilder), Error=HandshakeError>>
-    where R: Read + Send + 'static, W: Write + Send + 'static, RNG: Rng
-{
-    let ring_rng = rand::SystemRandom::new();
-    let client_priv_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &ring_rng).unwrap();
-    let mut key = [0u8; agreement::PUBLIC_KEY_MAX_LEN];
-    client_priv_key.compute_public_key(&mut key[..client_priv_key.public_key_len()]).unwrap();
-    let client_pub_key = &key[..client_priv_key.public_key_len()];
-    keybuilder.e = Some(client_pub_key.to_vec());
-
-    let kex_init = KexInit { e: client_pub_key.to_vec() };
-    let kex_message = serialize_msg(SSH_MSG_KEXDH_INIT, &kex_init).unwrap();
-
-    let w = unencrypted_write_packet(writer, kex_message, rng).and_then(|writer| {
-        flush(writer)
-    }).map_err(|e| e.into());
-    
-    let r = unencrypted_read_packet(reader).map_err(|e| e.into()).and_then(|(reader, payload)| {
-        match deserialize_msg::<KexReply>(&payload) {
-            Ok((msg_key, reply)) => if msg_key == SSH_MSG_KEXDH_REPLY {
-                let pub_key = {
-                    let &ServerKey::SSH_RSA { ref e, ref n } = &reply.server_key;
-                    (
-                        untrusted::Input::from(from_mpint(n)),
-                        untrusted::Input::from(from_mpint(e))
-                    )
-                };
-                keybuilder.k_s = Some(serialize(&reply.server_key).unwrap());
-                keybuilder.server_key = Some(reply.server_key.clone());
-                keybuilder.f = Some(reply.f.clone());
-                let server_pub_key = untrusted::Input::from(&reply.f);
-                agreement::agree_ephemeral(client_priv_key, &agreement::X25519, server_pub_key, HandshakeError::KexFailed, |shared_secret| {
-                    keybuilder.k = Some(into_mpint(shared_secret));
-                    Ok(())
-                }).unwrap();
-                let hash = keybuilder.digest(&digest::SHA256).unwrap();
-                let h = untrusted::Input::from(&hash.as_ref());
-                let Signature::SSH_RSA { signature: ref sgn } = reply.signature;
-                let sgn = untrusted::Input::from(sgn);
-                match signature::primitive::verify_rsa(&signature::RSA_PKCS1_2048_8192_SHA1,
-                                               pub_key, h, sgn) {
-                    Ok(()) => Ok((reader, keybuilder)),
-                    Err(_) => Err(HandshakeError::ServerKeyNotVerified)
-                }
-            } else {
-                Err(HandshakeError::InvalidKexReply("SSH_MSG_KEXDH_REPLY not received".to_string()))
-            },
-            Err(e) => Err(HandshakeError::InvalidKexReply(e.to_string()))
-        }
-    });
-
-    w.join(r).map(|(writer, (reader, keybuilder))| (reader, writer, keybuilder)).boxed()
 }
