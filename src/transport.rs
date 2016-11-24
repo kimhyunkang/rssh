@@ -197,7 +197,8 @@ impl <R, W, RNG, T> AsyncPacketTransport<R, W, RNG, T>
                 if let Async::Ready(buf) = try!(self.rd.nb_read_exact(5)) {
                     let pkt_len = ntoh(&buf[.. 4]);
                     let pad_len = buf[4];
-                    if pkt_len < 16 || pkt_len < (pad_len as u32) + 1 {
+                    if pkt_len < 12 || pkt_len < (pad_len as u32) + 1 {
+                        println!("pkt_len: {}, pad_len: {}", pkt_len, pad_len);
                         return Err(T::Error::invalid_header());
                     }
                     PacketReadState::ReadPayload(pkt_len, pad_len)
@@ -249,6 +250,7 @@ mod test {
         let mut rng = thread_rng();
         for payload_len in 1 .. 257 {
             if let Ok((pkt_len, pad_len)) = compute_pad_len(payload_len, 0, &mut rng) {
+                assert!(pkt_len >= 12);
                 assert_eq!(pkt_len % 8, 4);
                 assert_eq!(pkt_len as usize, pad_len as usize + payload_len + 1);
             } else {
