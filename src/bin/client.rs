@@ -13,7 +13,6 @@ use rssh::packet::types::{AlgorithmNegotiation, KexAlgorithm, ServerHostKeyAlgor
 use std::net::SocketAddr;
 
 use futures::Future;
-use rand::thread_rng;
 use tokio_core::io::Io;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Core;
@@ -38,9 +37,7 @@ fn main() {
             "RSSHS_0.1.0",
             "Hello"
         )
-    }).and_then(|(reader, writer, keybuilder)| {
-        println!("got hello message: {}", keybuilder.v_s.as_ref().unwrap());
-
+    }).and_then(|(reader, writer, (v_c, v_s))| {
         let supported_algorithms = AlgorithmNegotiation {
             kex_algorithms: vec![KexAlgorithm::CURVE25519_SHA256],
             server_host_key_algorithms: vec![ServerHostKeyAlgorithm::SSH_RSA],
@@ -56,21 +53,10 @@ fn main() {
             reserved: 0
         };
 
-        let mut rng = thread_rng();
-        rssh::handshake::algorithm_negotiation(
-            reader,
-            writer,
-            &supported_algorithms,
-            &mut rng,
-            keybuilder
-        )
-    }).and_then(|(reader, writer, neg, keybuilder)| {
-        let mut rng = thread_rng();
-        println!("got algorithm neg: {:?}", neg);
-        rssh::handshake::ecdh_curve25519_client(reader, writer, &mut rng, keybuilder)
-    }).map(|(_, _, keybuilder)| {
+        rssh::handshake::client_key_exchange(reader, writer, supported_algorithms, v_c, v_s)
+    }).map(|ctx| {
         println!("server key verified!");
-        println!("keybuilder: {:?}", keybuilder);
+        println!("ctx: {:?}", ctx);
     }).map_err(|e| {
         panic!("error: {}", e);
     });

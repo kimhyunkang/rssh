@@ -9,7 +9,7 @@ rand = "0.3"
 ring = "0.5"
 serde = "0.8"
 serde_derive = "0.8"
-tokio-core = { git = "https://github.com/tokio-rs/tokio-core.git", rev = "0a3dc0bb" }
+tokio-core = "0.1"
 untrusted = "0.3"
 
 [dev-dependencies]

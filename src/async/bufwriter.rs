@@ -114,6 +114,21 @@ impl <W: Write> AsyncBufWriter<W> {
             }
         }
     }
+
+    pub fn nb_write<F>(&mut self, len: usize, mut f: F) -> Poll<(), io::Error>
+        where F: FnMut(&mut [u8]) -> ()
+    {
+        if !self.buf.try_reserve(len) {
+            match try!(self.nb_flush_buf()) {
+                Async::NotReady => return Ok(Async::NotReady),
+                Async::Ready(()) => self.buf.reserve(len)
+            }
+        }
+
+        f(&mut self.buf.get_mut()[.. len]);
+        self.buf.fill(len);
+        Ok(Async::Ready(()))
+    }
 }
 
 impl <W: Write> Write for AsyncBufWriter<W> {
@@ -217,6 +232,31 @@ mod test {
 
             assert_eq!(Async::Ready(()), bufwriter.nb_write_exact(b"Hello, ").expect("error!"));
             assert_eq!(Async::Ready(()), bufwriter.nb_write_exact(b"world!").expect("error!"));
+            bufwriter.flush().expect("error!");
+
+            if let Async::Ready(w) = bufwriter.nb_into_inner().expect("error!") {
+                w
+            } else {
+                panic!("not ready");
+            }
+        };
+
+        let wsize = writer.position() as usize;
+        assert_eq!(b"Hello, world!".len(), wsize);
+
+        let buf = writer.into_inner();
+        assert_eq!(b"Hello, world!".as_ref(), &buf[.. wsize]);
+    }
+
+    #[test]
+    fn nb_write_then_flush() {
+        let writer = {
+            let buf = vec![0u8; 16];
+            let writer = Cursor::new(buf);
+            let mut bufwriter = AsyncBufWriter::with_capacity(4, writer);
+
+            assert_eq!(Async::Ready(()), bufwriter.nb_write(7, |buf| buf.copy_from_slice(b"Hello, ")).expect("error!"));
+            assert_eq!(Async::Ready(()), bufwriter.nb_write(6, |buf| buf.copy_from_slice(b"world!")).expect("error!"));
             bufwriter.flush().expect("error!");
 
             if let Async::Ready(w) = bufwriter.nb_into_inner().expect("error!") {

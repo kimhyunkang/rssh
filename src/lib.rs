@@ -22,5 +22,6 @@ pub mod packet;
 pub mod transport;
 
 pub const SSH_MSG_KEXINIT: u8 = 20;
+pub const SSH_MSG_NEWKEYS: u8 = 21;
 pub const SSH_MSG_KEXDH_INIT: u8 = 30;
 pub const SSH_MSG_KEXDH_REPLY: u8 = 31;

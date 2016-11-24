@@ -67,7 +67,8 @@ impl_name_enum!(ServerHostKeyAlgorithm {
 
 impl_name_enum!(EncryptionAlgorithm {
     AES256_CBC => "aes256-cbc",
-    AES256_CTR => "aes256-ctr"
+    AES256_CTR => "aes256-ctr",
+    AES256_GCM => "aes256-gcm@openssh.com"
 });
 
 impl_name_enum!(MacAlgorithm {
