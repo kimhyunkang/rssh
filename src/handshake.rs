@@ -25,6 +25,7 @@ pub enum HandshakeError {
     InvalidKexReply(String),
     KexFailed,
     ServerKeyNotVerified,
+    ExpectedNewKeys,
     UnknownCertType(String),
     Unspecified,
     Panic(String)
@@ -53,6 +54,8 @@ impl fmt::Display for HandshakeError {
                 write!(f, "KexFailed"),
             HandshakeError::ServerKeyNotVerified =>
                 write!(f, "ServerKeyNotVerified"),
+            HandshakeError::ExpectedNewKeys =>
+                write!(f, "ExpectedNewKeys"),
             HandshakeError::UnknownCertType(ref s) =>
                 write!(f, "UnknownCertType({})", s),
             HandshakeError::Unspecified =>
@@ -145,7 +148,7 @@ impl AsyncPacketState for ClientKeyExchange {
         match self.st {
             ClientKex::AlgorithmExchange(ref st) => st.wants_read(),
             ClientKex::KeyExchange(ref st) => st.wants_read(),
-            ClientKex::Agreed(_) => false,
+            ClientKex::Agreed(ref st) => st.wants_read(),
         }
     }
 
@@ -153,7 +156,7 @@ impl AsyncPacketState for ClientKeyExchange {
         match self.st {
             ClientKex::AlgorithmExchange(ref mut st) => st.on_read(msg),
             ClientKex::KeyExchange(ref mut st) => st.on_read(msg),
-            ClientKex::Agreed(_) => unreachable!()
+            ClientKex::Agreed(ref mut st) => st.on_read(msg)
         }
     }
 
@@ -309,7 +312,8 @@ impl Future for KeyExchangeState {
                 };
                 Ok(Async::Ready(Agreed {
                     ctx: Some(ssh_ctx),
-                    new_key_sent: false
+                    new_key_sent: false,
+                    new_key_received: false
                 }))
             },
             None => Ok(Async::NotReady)
@@ -393,6 +397,7 @@ impl AsyncPacketState for KeyExchangeState {
 
 pub struct Agreed {
     ctx: Option<SecureContext>,
+    new_key_received: bool,
     new_key_sent: bool
 }
 
@@ -401,7 +406,7 @@ impl Future for Agreed {
     type Error = HandshakeError;
 
     fn poll(&mut self) -> Poll<SecureContext, HandshakeError> {
-        if self.new_key_sent {
+        if self.new_key_sent && self.new_key_received {
             match self.ctx.take() {
                 Some(ctx) => Ok(Async::Ready(ctx)),
                 None => panic!("Called Agreed::poll() twice")
@@ -413,6 +418,19 @@ impl Future for Agreed {
 }
 
 impl AsyncPacketState for Agreed {
+    fn wants_read(&self) -> bool {
+        !self.new_key_received
+    }
+
+    fn on_read(&mut self, buf: &[u8]) -> Result<(), HandshakeError> {
+        if buf == &[SSH_MSG_NEWKEYS] {
+            self.new_key_received = true;
+            Ok(())
+        } else {
+            Err(HandshakeError::ExpectedNewKeys)
+        }
+    }
+
     fn write_packet(&self) -> Option<PacketWriteRequest> {
         if self.new_key_sent {
             None
