@@ -54,7 +54,7 @@ fn main() {
         };
 
         rssh::handshake::client_key_exchange(reader, writer, supported_algorithms, v_c, v_s)
-    }).map(|ctx| {
+    }).map(|(r, w, ctx)| {
         println!("server key verified!");
         println!("ctx: {:?}", ctx);
     }).map_err(|e| {

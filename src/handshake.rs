@@ -2,7 +2,7 @@ use async::bufreader::AsyncBufReader;
 use async::bufwriter::AsyncBufWriter;
 use packet::types::*;
 use packet::{deserialize, serialize, serialize_msg};
-use transport::{AsyncPacketState, AsyncPacketTransport, PacketWriteRequest, TransportError, hton};
+use transport::{AsyncPacketState, ClearTransport, PacketWriteRequest, TransportError, hton};
 
 use std::{fmt, io, str};
 use std::convert::TryFrom;
@@ -491,7 +491,7 @@ pub fn version_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<
 }
 
 pub fn client_key_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWriter<W>, neg: AlgorithmNegotiation, v_c: String, v_s: String)
-        -> AsyncPacketTransport<R, W, OsRng, ClientKeyExchange>
+        -> ClearTransport<R, W, OsRng, ClientKeyExchange>
     where R: Read, W: Write
 {   
     let mut rng = OsRng::new().unwrap();
@@ -505,7 +505,7 @@ pub fn client_key_exchange<R, W>(reader: AsyncBufReader<R>, writer: AsyncBufWrit
     };
     let kex = ClientKex::AlgorithmExchange(st);
 
-    AsyncPacketTransport::new(reader, writer, rng, ClientKeyExchange { st: kex })
+    ClearTransport::new(reader, writer, rng, ClientKeyExchange { st: kex })
 }
 
 fn into_mpint(buf: &[u8]) -> Vec<u8> {

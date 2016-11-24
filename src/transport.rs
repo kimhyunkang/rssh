@@ -73,7 +73,19 @@ impl PacketWriteState {
     }
 }
 
-pub struct AsyncPacketTransport<R: Read, W: Write, RNG, T> {
+pub struct ClearTransport<R: Read, W: Write, RNG, T>(Option<UnencryptedTransport<R, W, RNG, T>>);
+
+impl <R: Read, W: Write, RNG, T> ClearTransport<R, W, RNG, T> {
+    pub fn new(rd: AsyncBufReader<R>,
+               wr: AsyncBufWriter<W>,
+               rng: RNG,
+               st: T) -> ClearTransport<R, W, RNG, T>
+    {
+        ClearTransport(Some(UnencryptedTransport::new(rd, wr, rng, st)))
+    }
+}
+
+struct UnencryptedTransport<R: Read, W: Write, RNG, T> {
     rd: AsyncBufReader<R>,
     rd_st: PacketReadState,
     wr: AsyncBufWriter<W>,
@@ -82,13 +94,13 @@ pub struct AsyncPacketTransport<R: Read, W: Write, RNG, T> {
     st: T,
 }
 
-impl <R: Read, W: Write, RNG, T> AsyncPacketTransport<R, W, RNG, T> {
-    pub fn new(rd: AsyncBufReader<R>,
-               wr: AsyncBufWriter<W>,
-               rng: RNG,
-               st: T) -> AsyncPacketTransport<R, W, RNG, T>
+impl <R: Read, W: Write, RNG, T> UnencryptedTransport<R, W, RNG, T> {
+    fn new(rd: AsyncBufReader<R>,
+           wr: AsyncBufWriter<W>,
+           rng: RNG,
+           st: T) -> UnencryptedTransport<R, W, RNG, T>
     {
-        AsyncPacketTransport {
+        UnencryptedTransport {
             rd: rd,
             rd_st: PacketReadState::Idle,
             wr: wr,
@@ -152,7 +164,7 @@ pub fn compute_pad_len<R: Rng>(payload_len: usize, blk_size: usize, rng: &mut R)
     }
 }
 
-impl <R, W, RNG, T> AsyncPacketTransport<R, W, RNG, T>
+impl <R, W, RNG, T> UnencryptedTransport<R, W, RNG, T>
     where R: Read, W: Write, RNG: Rng, T: AsyncPacketState, T::Error: TransportError
 {
     fn try_write(&mut self) -> Result<bool, T::Error> {
@@ -247,7 +259,7 @@ impl <R, W, RNG, T> AsyncPacketTransport<R, W, RNG, T>
     }
 }
 
-impl <R, W, RNG, T, V, E> Future for AsyncPacketTransport<R, W, RNG, T>
+impl <R, W, RNG, T, V, E> Future for UnencryptedTransport<R, W, RNG, T>
     where R: Read, W: Write, RNG: Rng, T: AsyncPacketState + Future<Item=V, Error=E>, E: TransportError
 {
     type Item = V;
@@ -269,6 +281,26 @@ impl <R, W, RNG, T, V, E> Future for AsyncPacketTransport<R, W, RNG, T>
                 return Ok(Async::NotReady)
             }
         }
+    }
+}
+
+impl <R, W, RNG, T, V, E> Future for ClearTransport<R, W, RNG, T>
+    where R: Read, W: Write, RNG: Rng, T: AsyncPacketState + Future<Item=V, Error=E>, E: TransportError
+{
+    type Item = (AsyncBufReader<R>, AsyncBufWriter<W>, V);
+    type Error = E;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        let retval = match *self {
+            ClearTransport(Some(ref mut inner)) => match try!(inner.poll()) {
+                Async::NotReady => return Ok(Async::NotReady),
+                Async::Ready(x) => x
+            },
+            _ => panic!("Called the same ClearTransport twice")
+        };
+
+        let inner = self.0.take().unwrap();
+        Ok(Async::Ready((inner.rd, inner.wr, retval)))
     }
 }
 
